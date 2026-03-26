@@ -178,9 +178,7 @@ class NotificationService:
     async def connect(self):
         try:
             self.client = HybridClient(network=Network.MAINNET)
-            self.client._ws_client._callbacks.setdefault("__error__", []).append(
-                self._on_ws_error
-            )
+            self.client.on_error(self._on_ws_error)
             await self.client.connect()
             self.connected = True
             await self.send_webhook("SYSTEM", "Aster DEX connected to MAINNET")

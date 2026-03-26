@@ -1,0 +1,20 @@
+[webhook]
+url = "https://open.feishu.cn/open-apis/bot/v2/hook/e4162c9d-fe49-4e69-9d61-d2c3655fe266"
+
+[symbols]
+monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT","MONUSDT","ZECUSDT", "XAUUSDT","NVDAUSDT"]
+
+[supertrend]
+period1 = 9
+multiplier1 = 2.5
+period2 = 14
+multiplier2 = 1.7
+
+[vegas]
+ema_signal = 9
+ema_upper = 144
+ema_lower = 169
+
+[service]
+heartbeat_file = "notification_heartbeat"
+heartbeat_timeout = 120

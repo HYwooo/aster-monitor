@@ -13,7 +13,7 @@ import toml
 import numpy as np
 import talib
 
-from asterdex import HybridClient, Network
+from asterdex import WebSocketClient, Network
 from asterdex.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -115,7 +115,7 @@ class NotificationService:
         self.vt_ema_upper = self.config["vegas"]["ema_upper"]
         self.vt_ema_lower = self.config["vegas"]["ema_lower"]
         self.heartbeat_file = self.config["service"]["heartbeat_file"]
-        self.client: Optional[HybridClient] = None
+        self.client: Optional[WebSocketClient] = None
         self.mark_prices: dict[str, float] = {}
         self.kline_cache: dict[str, list] = {}
         self.benchmark: dict[str, dict] = {}
@@ -177,7 +177,7 @@ class NotificationService:
 
     async def connect(self):
         try:
-            self.client = HybridClient(network=Network.MAINNET)
+            self.client = WebSocketClient(network=Network.MAINNET)
             self.client.on_error(self._on_ws_error)
             await self.client.connect()
             self.connected = True

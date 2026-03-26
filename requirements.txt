@@ -1,0 +1,5 @@
+asterdex
+talib
+aiohttp
+toml
+numpy

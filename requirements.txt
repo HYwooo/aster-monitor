@@ -1,6 +1,7 @@
 asterdex
-talib
 aiohttp
-toml
 numpy
+talib
+toml
+websockets
 watchdog

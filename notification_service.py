@@ -89,6 +89,7 @@ def create_config(config_path: str, webhook_url: str, symbols: list = None) -> d
         "service": {
             "heartbeat_file": "notification_heartbeat",
             "heartbeat_timeout": 120,
+            "proxy": "",
         },
     }
     with open(config_path, "w", encoding="utf-8") as f:
@@ -134,6 +135,7 @@ class NotificationService:
         self.vt_ema_upper = self.config["vegas"]["ema_upper"]
         self.vt_ema_lower = self.config["vegas"]["ema_lower"]
         self.heartbeat_file = self.config["service"]["heartbeat_file"]
+        self.proxy = self.config["service"].get("proxy", "")
         self.client: Optional[WebSocketClient] = None
         self.mark_prices: dict[str, float] = {}
         self.kline_cache: dict[str, list] = {}
@@ -200,6 +202,7 @@ class NotificationService:
             "vt_ema_upper": self.vt_ema_upper,
             "vt_ema_lower": self.vt_ema_lower,
             "heartbeat_file": self.heartbeat_file,
+            "proxy": self.proxy,
         }
 
         def restore_state():
@@ -215,6 +218,7 @@ class NotificationService:
             self.vt_ema_upper = old_state["vt_ema_upper"]
             self.vt_ema_lower = old_state["vt_ema_lower"]
             self.heartbeat_file = old_state["heartbeat_file"]
+            self.proxy = old_state["proxy"]
 
         try:
             new_config = self._load_config(self.config_path)
@@ -238,6 +242,8 @@ class NotificationService:
             self.vt_ema_signal = self.config["vegas"]["ema_signal"]
             self.vt_ema_upper = self.config["vegas"]["ema_upper"]
             self.vt_ema_lower = self.config["vegas"]["ema_lower"]
+            self.heartbeat_file = self.config["service"]["heartbeat_file"]
+            self.proxy = self.config["service"].get("proxy", "")
             self.heartbeat_file = self.config["service"]["heartbeat_file"]
 
             new_symbols = set(self.symbols)
@@ -347,7 +353,9 @@ class NotificationService:
 
     async def connect(self):
         try:
-            self.client = WebSocketClient(network=Network.MAINNET)
+            self.client = WebSocketClient(
+                network=Network.MAINNET, proxy=self.proxy if self.proxy else None
+            )
             self.client.on_error(self._on_ws_error)
             await self.client.connect()
             self.connected = True

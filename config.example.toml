@@ -18,3 +18,4 @@ ema_lower = 169
 [service]
 heartbeat_file = "notification_heartbeat"
 heartbeat_timeout = 120
+#proxy = "http://127.0.0.1:7890"

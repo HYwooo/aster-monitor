@@ -2,3 +2,10 @@
 *.local
 *.pid
 .env
+config.toml
+notification_heartbeat
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.DS_Store

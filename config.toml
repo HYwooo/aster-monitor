@@ -1,8 +1,8 @@
 [webhook]
-url = "https://open.feishu.cn/open-apis/bot/v2/hook/e4162c9d-fe49-4e69-9d61-d2c3655fe266"
+url = "https://open.feishu.cn/open-apis/bot/v2/hook/3f2a1235-12d7-4f63-baa2-78265063c12e"
 
 [symbols]
-monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT","MONUSDT","ZECUSDT", "XAUUSDT","NVDAUSDT"]
+monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT","MONUSDT","ZECUSDT", "XAUUSDT"]
 
 [supertrend]
 period1 = 9

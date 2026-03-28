@@ -1,6 +1,7 @@
 import asyncio
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -12,6 +13,8 @@ import aiohttp
 import toml
 import numpy as np
 import talib
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 from asterdex import WebSocketClient, Network
 from asterdex.logging_config import get_logger
@@ -74,7 +77,7 @@ def create_config(config_path: str, webhook_url: str, symbols: list = None) -> d
     if symbols is None:
         symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "XAUUSDT"]
     config = {
-        "webhook": {"url": webhook_url},
+        "webhook": {"url": webhook_url, "format": "card"},
         "symbols": {"monitor_list": symbols},
         "supertrend": {
             "period1": 9,
@@ -102,11 +105,27 @@ def log_error(msg: str):
     logger.error(msg)
 
 
+def format_number(value: float) -> str:
+    if not math.isfinite(value):
+        return str(value)
+    if value == 0:
+        return "0.000000"
+    abs_val = abs(value)
+    if abs_val < 1:
+        return f"{value:.6f}"
+    int_digits = len(str(int(abs_val)))
+    decimal_places = max(0, 6 - int_digits)
+    formatted = f"{value:.{decimal_places}f}"
+    return formatted.rstrip("0").rstrip(".")
+
+
 class NotificationService:
     def __init__(self, config_path: str = "config.toml"):
+        self.config_path = config_path
         self.config = self._load_config(config_path)
         self.symbols = self.config["symbols"]["monitor_list"]
         self.webhook_url = self.config["webhook"]["url"]
+        self.webhook_format = self.config["webhook"].get("format", "card")
         self.st_period1 = self.config["supertrend"]["period1"]
         self.st_multiplier1 = self.config["supertrend"]["multiplier1"]
         self.st_period2 = self.config["supertrend"]["period2"]
@@ -126,16 +145,152 @@ class NotificationService:
         self.breakout_monitor: dict[str, dict] = {}
         self.connected = False
         self.running = False
+        self.observer: Optional[Observer] = None
+        self._initialized = False
 
     def _load_config(self, config_path: str) -> dict:
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Config file not found: {config_path}")
         return toml.load(config_path)
 
+    def _validate_config(self, config: dict) -> bool:
+        try:
+            if "symbols" not in config or "monitor_list" not in config["symbols"]:
+                return False
+            if not isinstance(config["symbols"]["monitor_list"], list):
+                return False
+            if "webhook" not in config or "url" not in config["webhook"]:
+                return False
+            if "supertrend" not in config:
+                return False
+            st_keys = ["period1", "multiplier1", "period2", "multiplier2"]
+            if not all(k in config["supertrend"] for k in st_keys):
+                return False
+            if not all(
+                isinstance(config["supertrend"][k], (int, float)) for k in st_keys
+            ):
+                return False
+            if "vegas" not in config:
+                return False
+            vt_keys = ["ema_signal", "ema_upper", "ema_lower"]
+            if not all(k in config["vegas"] for k in vt_keys):
+                return False
+            if not all(isinstance(config["vegas"][k], int) for k in vt_keys):
+                return False
+            if "service" not in config or "heartbeat_file" not in config["service"]:
+                return False
+            heartbeat_dir = os.path.dirname(config["service"]["heartbeat_file"])
+            if heartbeat_dir and not os.path.exists(heartbeat_dir):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def reload_config(self):
+        old_state = {
+            "config": self.config,
+            "symbols": self.symbols,
+            "webhook_url": self.webhook_url,
+            "webhook_format": self.webhook_format,
+            "st_period1": self.st_period1,
+            "st_multiplier1": self.st_multiplier1,
+            "st_period2": self.st_period2,
+            "st_multiplier2": self.st_multiplier2,
+            "vt_ema_signal": self.vt_ema_signal,
+            "vt_ema_upper": self.vt_ema_upper,
+            "vt_ema_lower": self.vt_ema_lower,
+            "heartbeat_file": self.heartbeat_file,
+        }
+
+        def restore_state():
+            self.config = old_state["config"]
+            self.symbols = old_state["symbols"]
+            self.webhook_url = old_state["webhook_url"]
+            self.webhook_format = old_state["webhook_format"]
+            self.st_period1 = old_state["st_period1"]
+            self.st_multiplier1 = old_state["st_multiplier1"]
+            self.st_period2 = old_state["st_period2"]
+            self.st_multiplier2 = old_state["st_multiplier2"]
+            self.vt_ema_signal = old_state["vt_ema_signal"]
+            self.vt_ema_upper = old_state["vt_ema_upper"]
+            self.vt_ema_lower = old_state["vt_ema_lower"]
+            self.heartbeat_file = old_state["heartbeat_file"]
+
+        try:
+            new_config = self._load_config(self.config_path)
+            if not self._validate_config(new_config):
+                logger.warning("[CONFIG] Hot reload skipped: invalid config format")
+                asyncio.create_task(
+                    self.send_webhook(
+                        "CONFIG ERROR", "Hot reload skipped: invalid config format"
+                    )
+                )
+                return
+
+            self.config = new_config
+            self.symbols = self.config["symbols"]["monitor_list"]
+            self.webhook_url = self.config["webhook"]["url"]
+            self.webhook_format = self.config["webhook"].get("format", "card")
+            self.st_period1 = self.config["supertrend"]["period1"]
+            self.st_multiplier1 = self.config["supertrend"]["multiplier1"]
+            self.st_period2 = self.config["supertrend"]["period2"]
+            self.st_multiplier2 = self.config["supertrend"]["multiplier2"]
+            self.vt_ema_signal = self.config["vegas"]["ema_signal"]
+            self.vt_ema_upper = self.config["vegas"]["ema_upper"]
+            self.vt_ema_lower = self.config["vegas"]["ema_lower"]
+            self.heartbeat_file = self.config["service"]["heartbeat_file"]
+
+            new_symbols = set(self.symbols)
+            old_symbols = set(old_state["symbols"])
+            if new_symbols != old_symbols:
+                logger.info(
+                    f"Config reload: symbols changed from {old_symbols} to {new_symbols}"
+                )
+            if self.webhook_url != old_state["webhook_url"]:
+                logger.info(f"Config reload: webhook URL changed")
+
+            logger.info(f"[CONFIG] Hot reload successful: {len(self.symbols)} symbols")
+            asyncio.create_task(
+                self.send_webhook(
+                    "CONFIG", f"Hot reload successful: {len(self.symbols)} symbols"
+                )
+            )
+        except Exception as e:
+            restore_state()
+            error_msg = f"Hot reload failed, restored previous config: {e}"
+            logger.warning(f"[CONFIG] {error_msg}")
+            asyncio.create_task(self.send_webhook("CONFIG ERROR", error_msg))
+
+    class ConfigFileHandler(FileSystemEventHandler):
+        def __init__(self, service):
+            self.service = service
+            self.last_reload = 0
+
+        def on_modified(self, event):
+            if event.src_path.endswith("config.toml"):
+                now = time.time()
+                if now - self.last_reload > 5:
+                    self.last_reload = now
+                    logger.info(f"[CONFIG] Detected config change, reloading...")
+                    self.service.reload_config()
+
+    async def config_watch_loop(self):
+        config_dir = os.path.dirname(os.path.abspath(self.config_path)) or "."
+        event_handler = self.ConfigFileHandler(self)
+        self.observer = Observer()
+        self.observer.schedule(event_handler, config_dir, recursive=False)
+        self.observer.start()
+        logger.info(f"[CONFIG] Watching for config changes: {self.config_path}")
+        try:
+            while self.running:
+                await asyncio.sleep(1)
+        finally:
+            self.observer.stop()
+            self.observer.join()
+
     async def send_webhook(self, alert_type: str, message: str, extra: dict = None):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # TradingView Alert Format
         full_content = f"{alert_type}: {message}"
         if extra:
             full_content += f" | {json.dumps(extra)}"
@@ -148,7 +303,22 @@ class NotificationService:
         except Exception as e:
             logger.warning(f"Write webhook log failed: {e}")
 
-        msg = {"msg_type": "text", "content": {"text": full_content}}
+        if self.webhook_format == "card":
+            msg = {
+                "msg_type": "interactive",
+                "card": {
+                    "header": {
+                        "title": {
+                            "tag": "plain_text",
+                            "content": f"Aster Monitor - {alert_type}",
+                        },
+                        "template": "red" if "ERROR" in alert_type else "blue",
+                    },
+                    "elements": [{"tag": "markdown", "content": f"**{message}**"}],
+                },
+            }
+        else:
+            msg = {"msg_type": "text", "content": {"text": full_content}}
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -181,9 +351,10 @@ class NotificationService:
             self.client.on_error(self._on_ws_error)
             await self.client.connect()
             self.connected = True
-            await self.send_webhook("SYSTEM", "Aster DEX connected to MAINNET")
+            await self.send_webhook("SYSTEM", "Aster Monitor connected to Mainnet")
             for symbol in self.symbols:
-                self.subscribe_symbol(symbol)
+                await self.subscribe_symbol(symbol)
+            await self.subscribe_all_tickers()
         except Exception as e:
             await self.send_error(e, "Connect")
             raise
@@ -194,12 +365,13 @@ class NotificationService:
             self.connected = False
             await self.send_webhook("SYSTEM", f"WebSocket disconnected: {error}")
 
-    def subscribe_symbol(self, symbol: str):
+    async def subscribe_symbol(self, symbol: str):
         @self.client.on_ticker(symbol)
         async def on_ticker(data):
             try:
-                price = float(data.get("lastPrice", 0))
-                self.mark_prices[symbol] = price
+                price = float(data.get("c", data.get("lastPrice", 0)))
+                if price > 0:
+                    self.mark_prices[symbol] = price
                 await self.check_signals(symbol)
             except Exception as e:
                 self.warn(f"ticker callback error: {e}", f"symbol={symbol}")
@@ -213,6 +385,11 @@ class NotificationService:
                 self.warn(f"kline callback error: {e}", f"symbol={symbol}")
 
         logger.info(f"Subscribed to {symbol}")
+
+    async def subscribe_all_tickers(self):
+        params = [f"{symbol.lower()}@ticker" for symbol in self.symbols]
+        await self.client.subscribe_batch(params)
+        logger.info(f"Batch subscribed to {len(params)} tickers")
 
     async def fetch_klines(
         self, symbol: str, limit: int = 500, interval: str = "1h"
@@ -420,14 +597,24 @@ class NotificationService:
                 high, low, close, self.st_period2, self.st_multiplier2
             )
             ema_s, ema_u, ema_l = self.calculate_vegas_tunnel(close)
-            if np.isnan(st1[-1]) or np.isnan(st2[-1]):
+            st1_val, st2_val = float(st1[-1]), float(st2[-1])
+            ema_s_val, ema_u_val, ema_l_val = (
+                float(ema_s[-1]),
+                float(ema_u[-1]),
+                float(ema_l[-1]),
+            )
+            if not all(
+                math.isfinite(v)
+                for v in [st1_val, st2_val, ema_s_val, ema_u_val, ema_l_val]
+            ):
+                logger.warning(f"recalculate_states: invalid float value for {symbol}")
                 return
             self.benchmark[symbol] = {
-                "st1": st1[-1],
-                "st2": st2[-1],
-                "ema_s": ema_s[-1],
-                "ema_u": ema_u[-1],
-                "ema_l": ema_l[-1],
+                "st1": st1_val,
+                "st2": st2_val,
+                "ema_s": ema_s_val,
+                "ema_u": ema_u_val,
+                "ema_l": ema_l_val,
                 "kline_time": int(klines[-1][0]),
             }
         except Exception as e:
@@ -461,12 +648,17 @@ class NotificationService:
             "1" if ema_s_val > ema_l_val else "0"
         )
 
+        if not self._initialized:
+            self.last_st_state[symbol] = st_state
+            self.last_vt_state[symbol] = vt_state
+            return
+
         now = time.time()
 
         if st_state != self.last_st_state.get(symbol):
             old_state = self.last_st_state.get(symbol, "??")
             self.last_st_state[symbol] = st_state
-            if st_state in ["11", "00"]:
+            if st_state in ["11", "00"] and old_state not in ["11", "00"]:
                 last_alert = self.last_alert_time.get(f"ST_{symbol}", 0)
                 if now - last_alert > 3600:
                     self.last_alert_time[f"ST_{symbol}"] = now
@@ -483,7 +675,7 @@ class NotificationService:
         if vt_state != self.last_vt_state.get(symbol):
             old_state = self.last_vt_state.get(symbol, "??")
             self.last_vt_state[symbol] = vt_state
-            if vt_state in ["11", "00"]:
+            if vt_state in ["11", "00"] and old_state not in ["11", "00"]:
                 last_alert = self.last_alert_time.get(f"VT_{symbol}", 0)
                 if now - last_alert > 3600:
                     self.last_alert_time[f"VT_{symbol}"] = now
@@ -496,6 +688,7 @@ class NotificationService:
 
     async def initialize(self):
         logger.info(f"Initializing klines for {len(self.symbols)} symbols...")
+        self._initialized = False
         for symbol in self.symbols:
             await self.update_klines(symbol)
         await asyncio.sleep(2)
@@ -521,17 +714,62 @@ class NotificationService:
                 self.last_st_state[symbol] = st_state
                 self.last_vt_state[symbol] = vt_state
                 logger.info(f"{symbol}: ST={st_state}, VT={vt_state}")
+        self._initialized = True
+        logger.info("Initialization complete")
 
     async def heartbeat_loop(self):
         while self.running:
             self.write_heartbeat()
             await asyncio.sleep(30)
 
+    async def status_loop(self):
+        while self.running:
+            try:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logger.info(f"[STATUS] {timestamp}")
+                symbols_copy = list(self.symbols)
+                for symbol in symbols_copy:
+                    try:
+                        current_price = self.mark_prices.get(symbol)
+                        bm = self.benchmark.get(symbol)
+                        if bm:
+                            ema_s = bm["ema_s"]
+                            ema_u = bm["ema_u"]
+                            ema_l = bm["ema_l"]
+                            st1_val = bm["st1"]
+                            st2_val = bm["st2"]
+                            st_state = (
+                                "1"
+                                if current_price and current_price > st1_val
+                                else "0"
+                            ) + (
+                                "1"
+                                if current_price and current_price > st2_val
+                                else "0"
+                            )
+                            vt_state = ("1" if ema_s > ema_u else "0") + (
+                                "1" if ema_s > ema_l else "0"
+                            )
+                            logger.info(
+                                f"[STATUS] {symbol}: Price={format_number(current_price) if current_price is not None else 'N/A'}, ST={st_state}, EMA_S={format_number(ema_s)}, EMA_U={format_number(ema_u)}, EMA_L={format_number(ema_l)}, VT={vt_state}"
+                            )
+                        else:
+                            logger.warning(
+                                f"[STATUS] {symbol}: benchmark not ready (klines insufficient), price={current_price}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[STATUS] {symbol}: error: {e}")
+            except Exception as e:
+                logger.warning(f"[STATUS] loop error: {e}")
+            await asyncio.sleep(120)
+
     async def run(self):
         self.running = True
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
+        config_task = asyncio.create_task(self.config_watch_loop())
         await self.connect()
         await self.initialize()
+        status_task = asyncio.create_task(self.status_loop())
         last_kline_update = 0
         while self.running:
             try:
@@ -548,19 +786,27 @@ class NotificationService:
                     )
                     await self.client.connect()
                     self.connected = True
-                    await self.send_webhook("SYSTEM", "Reconnected to Aster DEX")
+                    await self.send_webhook(
+                        "SYSTEM", "Aster Monitor reconnected to Mainnet"
+                    )
                     for symbol in self.symbols:
-                        self.subscribe_symbol(symbol)
+                        await self.subscribe_symbol(symbol)
+                    await self.subscribe_all_tickers()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 await self.send_error(e, "Main Loop")
                 await asyncio.sleep(5)
         heartbeat_task.cancel()
+        status_task.cancel()
+        config_task.cancel()
 
     async def stop(self):
         self.running = False
         self.breakout_monitor.clear()
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
         if self.client:
             await self.client.disconnect()
         if os.path.exists(self.heartbeat_file):

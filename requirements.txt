@@ -3,3 +3,4 @@ talib
 aiohttp
 toml
 numpy
+watchdog

@@ -1,4 +1,4 @@
-config.toml
+./config.toml
 *.log
 *.local
 *.pid
@@ -9,3 +9,4 @@ __pycache__/
 *.pyo
 .ruff_cache/
 .DS_Store
+config.toml

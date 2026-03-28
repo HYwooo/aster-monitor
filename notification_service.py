@@ -400,12 +400,15 @@ class NotificationService:
         logger.info(f"Batch subscribed to {len(params)} tickers")
 
     async def fetch_klines(
-        self, symbol: str, limit: int = 500, interval: str = "1h"
+        self, symbol: str, limit: int = 500, interval: str = "1h", proxy: str = None
     ) -> list:
         try:
             url = f"https://fapi.asterdex.com/fapi/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+            kwargs = {}
+            if proxy:
+                kwargs["proxy"] = proxy
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=30) as resp:
+                async with session.get(url, timeout=30, **kwargs) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         return data if data else []
@@ -458,7 +461,9 @@ class NotificationService:
     async def start_breakout_monitor(self, symbol, direction, price, trigger_time):
         if symbol in self.breakout_monitor:
             return
-        history = await self.fetch_klines(symbol, limit=20, interval="15m")
+        history = await self.fetch_klines(
+            symbol, limit=20, interval="15m", proxy=self.proxy if self.proxy else None
+        )
         if not history:
             self.warn(f"Failed to fetch 15m history for {symbol}", "breakout")
             return
@@ -579,7 +584,9 @@ class NotificationService:
 
     async def update_klines(self, symbol: str):
         try:
-            klines = await self.fetch_klines(symbol)
+            klines = await self.fetch_klines(
+                symbol, proxy=self.proxy if self.proxy else None
+            )
             if klines:
                 self.kline_cache[symbol] = klines
                 last_time = self.last_kline_time.get(symbol, 0)

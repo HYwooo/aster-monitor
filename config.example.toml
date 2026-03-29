@@ -1,5 +1,6 @@
 [webhook]
 url = "https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-here"
+format = "card"
 
 [symbols]
 monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "XAUUSDT"]
@@ -18,4 +19,15 @@ ema_lower = 169
 [service]
 heartbeat_file = "notification_heartbeat"
 heartbeat_timeout = 120
-#proxy = "http://127.0.0.1:7890"
+
+[proxy]
+enable = false
+url = "http://127.0.0.1:7890"
+
+[report]
+enable = false
+times = ["08:00", "20:00"]
+
+[settings]
+timezone = "Z"       # Z=UTC+0, "+08:00"=UTC+8, "-05:00"=UTC-5
+max_log_lines = 1000

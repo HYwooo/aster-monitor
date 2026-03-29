@@ -9,11 +9,13 @@
 - **Vegas Tunnel信号**: EMA9/144/169，状态11/00
 - **突破确认**: ST变11/00时启动15m监控，确认/假突破推送
 - **飞书推送**: 支持Card和TradingView两种消息格式
-- **每2分钟状态报告**: 自动打印所有标的Mark Price、ST、EMA值
+- **每2分钟状态报告**: 可通过命令控制打印/暂停
+- **每日报告**: 定时推送过去24小时警报次数
 - **热重载**: 修改config.toml自动重载配置，支持回滚
 - **初始化过滤**: 启动时已有状态不重复推送，只在状态切换时推送
+- **代理支持**: 可配置HTTP/HTTPS代理
 - **错误分级**: Error推Webhook，Warning只Log
-- **7天日志滚动**: webhook_history.log自动清理
+- **日志轮转**: webhook_history.log超过max_log_lines自动轮转
 - **守护进程**: 心跳监控+自动重连
 
 ## 快速开始
@@ -55,6 +57,16 @@ python notification_service.py
 ./scripts/start.sh
 ```
 
+## 命令行控制
+
+运行时可输入以下命令：
+
+| 命令 | 说明 |
+|------|------|
+| `stop print` | 暂停每2分钟的状态打印 |
+| `resume print` | 恢复状态打印 |
+| `status` | 查看当前状态和警报计数 |
+
 ## 飞书消息格式
 
 ### Card格式 (默认)
@@ -78,6 +90,7 @@ python notification_service.py
 | BREAKOUT | `BREAKOUT: BTCUSDT LONG FALSE (NO_CONTINUATION)` | 假突破-无延续 |
 | SYSTEM | `Aster Monitor connected to Mainnet` | 系统消息 |
 | CONFIG | `Hot reload successful` | 配置热重载 |
+| REPORT | `Alert count in last 24h: 5` | Daily report |
 
 ## 状态报告 (每2分钟)
 
@@ -89,18 +102,7 @@ python notification_service.py
 [STATUS] ETHUSDT: Price=2024.6, ST=11, EMA_S=2006.16, EMA_U=2078.44, EMA_L=2085.63, VT=00
 ```
 
-数值格式：整数部分非零时按6位有效数字，整数为零时保留6位小数。
-
-## 命令行参数
-
-| 参数 | 说明 |
-|------|------|
-| `-w, --webhook` | 飞书WebHook URL |
-| `-s, --symbols` | 监控标的 (逗号分隔) |
-| `-a, --add-symbol` | 添加标的 |
-| `-r, --remove-symbol` | 移除标的 |
-| `-l, --list-symbols` | 查看当前标的 |
-| `-c, --config` | 配置文件路径 |
+数值格式：整数部分非零时按8位有效数字，整数为零时保留8位小数。
 
 ## 配置文件 (config.toml)
 
@@ -126,7 +128,45 @@ ema_lower = 169
 [service]
 heartbeat_file = "notification_heartbeat"
 heartbeat_timeout = 120
+
+[proxy]
+enable = false
+url = "http://127.0.0.1:7890"
+
+[report]
+enable = false
+times = ["08:00", "20:00"]
+
+[settings]
+timezone = "Z"       # Z=UTC+0, "+08:00"=UTC+8, "-05:00"=UTC-5
+max_log_lines = 1000
 ```
+
+### 代理配置
+
+```toml
+[proxy]
+enable = true
+url = "http://127.0.0.1:7890"
+```
+
+### 每日报告配置
+
+```toml
+[report]
+enable = true
+times = ["08:00", "20:00"]
+```
+
+### 时间与日志配置
+
+```toml
+[settings]
+timezone = "Z"          # Z=UTC+0, "+08:00"=UTC+8, "-05:00"=UTC-5
+max_log_lines = 1000   # 超过此行数自动轮转日志
+```
+
+### 热重载
 
 ### 热重载
 
@@ -134,6 +174,17 @@ heartbeat_timeout = 120
 - 验证配置合法性，非法配置拒绝重载并回滚
 - 成功重载后推送飞书通知
 - 重载失败时自动恢复之前配置
+
+## 命令行参数
+
+| 参数 | 说明 |
+|------|------|
+| `-w, --webhook` | 飞书WebHook URL |
+| `-s, --symbols` | 监控标的 (逗号分隔) |
+| `-a, --add-symbol` | 添加标的 |
+| `-r, --remove-symbol` | 移除标的 |
+| `-l, --list-symbols` | 查看当前标的 |
+| `-c, --config` | 配置文件路径 |
 
 ## 文件结构
 
@@ -159,7 +210,7 @@ aster-monitor/
 
 ## 日志
 
-- `webhook_history.log`: 推送记录，7天自动清理
+- `webhook_history.log`: 推送记录，超过 `max_log_lines` 行后自动轮转
 - 控制台输出: 服务运行日志
 
 ## License

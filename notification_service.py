@@ -1,9 +1,11 @@
 import asyncio
 import argparse
+import fcntl
 import json
 import math
 import os
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -89,7 +91,14 @@ def create_config(config_path: str, webhook_url: str, symbols: list = None) -> d
         "service": {
             "heartbeat_file": "notification_heartbeat",
             "heartbeat_timeout": 120,
-            "proxy": "",
+        },
+        "proxy": {
+            "enable": False,
+            "url": "",
+        },
+        "report": {
+            "enable": False,
+            "times": ["08:00", "20:00"],
         },
     }
     with open(config_path, "w", encoding="utf-8") as f:
@@ -110,12 +119,12 @@ def format_number(value: float) -> str:
     if not math.isfinite(value):
         return str(value)
     if value == 0:
-        return "0.000000"
+        return "0.00000000"
     abs_val = abs(value)
     if abs_val < 1:
-        return f"{value:.6f}"
+        return f"{value:.8f}"
     int_digits = len(str(int(abs_val)))
-    decimal_places = max(0, 6 - int_digits)
+    decimal_places = max(0, 8 - int_digits)
     formatted = f"{value:.{decimal_places}f}"
     return formatted.rstrip("0").rstrip(".")
 
@@ -135,9 +144,17 @@ class NotificationService:
         self.vt_ema_upper = self.config["vegas"]["ema_upper"]
         self.vt_ema_lower = self.config["vegas"]["ema_lower"]
         self.heartbeat_file = self.config["service"]["heartbeat_file"]
-        self.proxy = self.config["service"].get("proxy", "")
+        self.proxy_enable = self.config.get("proxy", {}).get("enable", False)
+        self.proxy_url = self.config.get("proxy", {}).get("url", "")
+        self.report_enable = self.config.get("report", {}).get("enable", False)
+        self.report_times = self.config.get("report", {}).get(
+            "times", ["08:00", "20:00"]
+        )
+        self.timezone = self.config.get("settings", {}).get("timezone", "Z")
+        self.max_log_lines = self.config.get("settings", {}).get("max_log_lines", 1000)
         self.client: Optional[WebSocketClient] = None
         self.mark_prices: dict[str, float] = {}
+        self.mark_price_times: dict[str, float] = {}
         self.kline_cache: dict[str, list] = {}
         self.benchmark: dict[str, dict] = {}
         self.last_st_state: dict[str, str] = {}
@@ -149,6 +166,34 @@ class NotificationService:
         self.running = False
         self.observer: Optional[Observer] = None
         self._initialized = False
+        self._status_print_enabled = True
+        self._alert_count = 0
+        self._last_report_time = 0
+        self._lock = threading.Lock()
+
+    def _get_timestamp(self) -> str:
+        tz = self.timezone
+        if tz == "Z":
+            return datetime.now().strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        elif tz.startswith("+") or tz.startswith("-"):
+            return datetime.now().strftime(f"%Y-%m-%dT%H:%M:%S{tz}")
+        else:
+            return datetime.now().strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    def _rotate_webhook_log_if_needed(self):
+        try:
+            if not os.path.exists(WEBHOOK_LOG_FILE):
+                return
+            with open(WEBHOOK_LOG_FILE, "r+", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                lines = f.readlines()
+                if len(lines) > self.max_log_lines:
+                    f.seek(0)
+                    f.truncate()
+                    f.writelines(lines[-self.max_log_lines :])
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception as e:
+            logger.warning(f"Log rotation failed: {e}")
 
     def _load_config(self, config_path: str) -> dict:
         if not os.path.exists(config_path):
@@ -202,7 +247,12 @@ class NotificationService:
             "vt_ema_upper": self.vt_ema_upper,
             "vt_ema_lower": self.vt_ema_lower,
             "heartbeat_file": self.heartbeat_file,
-            "proxy": self.proxy,
+            "proxy_enable": self.proxy_enable,
+            "proxy_url": self.proxy_url,
+            "report_enable": self.report_enable,
+            "report_times": self.report_times,
+            "timezone": self.timezone,
+            "max_log_lines": self.max_log_lines,
         }
 
         def restore_state():
@@ -218,7 +268,12 @@ class NotificationService:
             self.vt_ema_upper = old_state["vt_ema_upper"]
             self.vt_ema_lower = old_state["vt_ema_lower"]
             self.heartbeat_file = old_state["heartbeat_file"]
-            self.proxy = old_state["proxy"]
+            self.proxy_enable = old_state["proxy_enable"]
+            self.proxy_url = old_state["proxy_url"]
+            self.report_enable = old_state["report_enable"]
+            self.report_times = old_state["report_times"]
+            self.timezone = old_state["timezone"]
+            self.max_log_lines = old_state["max_log_lines"]
 
         try:
             new_config = self._load_config(self.config_path)
@@ -243,8 +298,16 @@ class NotificationService:
             self.vt_ema_upper = self.config["vegas"]["ema_upper"]
             self.vt_ema_lower = self.config["vegas"]["ema_lower"]
             self.heartbeat_file = self.config["service"]["heartbeat_file"]
-            self.proxy = self.config["service"].get("proxy", "")
-            self.heartbeat_file = self.config["service"]["heartbeat_file"]
+            self.proxy_enable = self.config.get("proxy", {}).get("enable", False)
+            self.proxy_url = self.config.get("proxy", {}).get("url", "")
+            self.report_enable = self.config.get("report", {}).get("enable", False)
+            self.report_times = self.config.get("report", {}).get(
+                "times", ["08:00", "20:00"]
+            )
+            self.timezone = self.config.get("settings", {}).get("timezone", "Z")
+            self.max_log_lines = self.config.get("settings", {}).get(
+                "max_log_lines", 1000
+            )
 
             new_symbols = set(self.symbols)
             old_symbols = set(old_state["symbols"])
@@ -294,35 +357,157 @@ class NotificationService:
             self.observer.stop()
             self.observer.join()
 
+    def _build_feishu_card(
+        self, alert_type: str, message: str, extra: dict, timestamp: str
+    ) -> dict:
+        extra = extra or {}
+        direction = extra.get("direction", "").lower()
+        symbol = extra.get("symbol", "")
+        state = extra.get("state", "")
+        reason = extra.get("reason", "")
+
+        if alert_type in ("ST", "VT"):
+            if direction == "long" or direction == "bullish":
+                color = "green"
+                emoji = "📈"
+                direction_label = "LONG" if alert_type == "ST" else "BULLISH"
+            else:
+                color = "red"
+                emoji = "📉"
+                direction_label = "SHORT" if alert_type == "ST" else "BEARISH"
+
+            if alert_type == "ST":
+                title = f"{emoji} SuperTrend {symbol}"
+                price = extra.get("price", "")
+                st1 = extra.get("st1", "")
+                st2 = extra.get("st2", "")
+                elements = [
+                    {"tag": "markdown", "content": f"**Direction:** {direction_label}"},
+                    {"tag": "markdown", "content": f"**Price:** {price}"},
+                    {"tag": "markdown", "content": f"**ST1:** {st1} | **ST2:** {st2}"},
+                    {"tag": "hr"},
+                    {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                ]
+            else:
+                title = f"{emoji} Vegas Tunnel {symbol}"
+                ema9 = extra.get("ema9", "")
+                ema144 = extra.get("ema144", "")
+                ema169 = extra.get("ema169", "")
+                elements = [
+                    {"tag": "markdown", "content": f"**Direction:** {direction_label}"},
+                    {"tag": "markdown", "content": f"**EMA9:** {ema9}"},
+                    {
+                        "tag": "markdown",
+                        "content": f"**EMA144:** {ema144} | **EMA169:** {ema169}",
+                    },
+                    {"tag": "hr"},
+                    {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                ]
+
+        elif alert_type == "BREAKOUT":
+            confirmed = extra.get("confirmed", False)
+            if confirmed:
+                color = "orange"
+                emoji = "🚀"
+                status = "CONFIRMED"
+            elif reason == "reverse":
+                color = "yellow"
+                emoji = "🔄"
+                status = "REVERSE"
+            else:
+                color = "yellow"
+                emoji = "⏳"
+                status = "NO_CONTINUATION"
+
+            direction_label = direction.upper() if direction else ""
+            price = extra.get("price", "")
+            trigger = extra.get("trigger", "")
+            elements = [
+                {"tag": "markdown", "content": f"**Direction:** {direction_label}"},
+                {"tag": "markdown", "content": f"**Price:** {price}"},
+                {"tag": "markdown", "content": f"**Trigger:** {trigger}"},
+                {"tag": "markdown", "content": f"**Status:** {status}"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+            ]
+            title = f"{emoji} Breakout {symbol} {status}"
+
+        elif alert_type == "SYSTEM":
+            color = "blue"
+            title = f"🔔 System"
+            elements = [
+                {"tag": "markdown", "content": f"**{message}**"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+            ]
+
+        elif alert_type == "ERROR":
+            color = "red"
+            title = f"⚠️ Error"
+            elements = [
+                {"tag": "markdown", "content": f"**{message}**"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+            ]
+
+        elif alert_type == "CONFIG":
+            color = "purple"
+            title = f"⚙️ Config"
+            elements = [
+                {"tag": "markdown", "content": f"**{message}**"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+            ]
+
+        elif alert_type == "CONFIG ERROR":
+            color = "red"
+            title = f"⚙️ Config Error"
+            elements = [
+                {"tag": "markdown", "content": f"**{message}**"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+            ]
+
+        elif alert_type == "REPORT":
+            color = "purple"
+            title = f"📊 Daily Report"
+            elements = [
+                {"tag": "markdown", "content": f"**{message}**"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+            ]
+
+        else:
+            color = "blue"
+            title = f"Aster Monitor - {alert_type}"
+            elements = [
+                {"tag": "markdown", "content": f"**{message}**"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+            ]
+
+        return {
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": color,
+            },
+            "elements": elements,
+        }
+
     async def send_webhook(self, alert_type: str, message: str, extra: dict = None):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        full_content = f"{alert_type}: {message}"
-        if extra:
-            full_content += f" | {json.dumps(extra)}"
-
-        logger.info(f"[WEBHOOK] {full_content}")
+        timestamp = self._get_timestamp()
+        full_content = f"[{timestamp}] {alert_type}: {message}"
 
         try:
+            self._rotate_webhook_log_if_needed()
             with open(WEBHOOK_LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {full_content}\n")
         except Exception as e:
             logger.warning(f"Write webhook log failed: {e}")
 
         if self.webhook_format == "card":
-            msg = {
-                "msg_type": "interactive",
-                "card": {
-                    "header": {
-                        "title": {
-                            "tag": "plain_text",
-                            "content": f"Aster Monitor - {alert_type}",
-                        },
-                        "template": "red" if "ERROR" in alert_type else "blue",
-                    },
-                    "elements": [{"tag": "markdown", "content": f"**{message}**"}],
-                },
-            }
+            card = self._build_feishu_card(alert_type, message, extra, timestamp)
+            msg = {"msg_type": "interactive", "card": card}
         else:
             msg = {"msg_type": "text", "content": {"text": full_content}}
 
@@ -354,7 +539,8 @@ class NotificationService:
     async def connect(self):
         try:
             self.client = WebSocketClient(
-                network=Network.MAINNET, proxy=self.proxy if self.proxy else None
+                network=Network.MAINNET,
+                proxy=self.proxy_url if self.proxy_enable else None,
             )
             self.client.on_error(self._on_ws_error)
             await self.client.connect()
@@ -380,6 +566,7 @@ class NotificationService:
                 price = float(data.get("c", data.get("lastPrice", 0)))
                 if price > 0:
                     self.mark_prices[symbol] = price
+                    self.mark_price_times[symbol] = time.time()
                 await self.check_signals(symbol)
             except Exception as e:
                 self.warn(f"ticker callback error: {e}", f"symbol={symbol}")
@@ -462,7 +649,10 @@ class NotificationService:
         if symbol in self.breakout_monitor:
             return
         history = await self.fetch_klines(
-            symbol, limit=20, interval="15m", proxy=self.proxy if self.proxy else None
+            symbol,
+            limit=20,
+            interval="15m",
+            proxy=self.proxy_url if self.proxy_enable else None,
         )
         if not history:
             self.warn(f"Failed to fetch 15m history for {symbol}", "breakout")
@@ -520,72 +710,94 @@ class NotificationService:
             if current_close > max_prev:
                 await self.send_webhook(
                     "BREAKOUT",
-                    f"{symbol} LONG CONFIRMED | price={current_close:.4f} trigger={trigger_price:.4f}",
-                    {"symbol": symbol, "direction": "long", "confirmed": True},
+                    f"{symbol} LONG CONFIRMED",
+                    {
+                        "symbol": symbol,
+                        "direction": "long",
+                        "confirmed": True,
+                        "price": f"{current_close:.4f}",
+                        "trigger": f"{trigger_price:.4f}",
+                    },
                 )
+                self._increment_alert_count()
                 await self.stop_breakout_monitor(symbol)
             elif current_close < min_prev:
                 await self.send_webhook(
                     "BREAKOUT",
-                    f"{symbol} LONG FALSE (REVERSE) | price={current_close:.4f}",
+                    f"{symbol} LONG FALSE (REVERSE)",
                     {
                         "symbol": symbol,
                         "direction": "long",
                         "confirmed": False,
                         "reason": "reverse",
+                        "price": f"{current_close:.4f}",
                     },
                 )
+                self._increment_alert_count()
                 await self.stop_breakout_monitor(symbol)
             elif count >= 20:
                 await self.send_webhook(
                     "BREAKOUT",
-                    f"{symbol} LONG FALSE (NO_CONTINUATION) | price={current_close:.4f}",
+                    f"{symbol} LONG FALSE (NO_CONTINUATION)",
                     {
                         "symbol": symbol,
                         "direction": "long",
                         "confirmed": False,
                         "reason": "no_continuation",
+                        "price": f"{current_close:.4f}",
                     },
                 )
+                self._increment_alert_count()
                 await self.stop_breakout_monitor(symbol)
 
         elif direction == "00":
             if current_close < min_prev:
                 await self.send_webhook(
                     "BREAKOUT",
-                    f"{symbol} SHORT CONFIRMED | price={current_close:.4f} trigger={trigger_price:.4f}",
-                    {"symbol": symbol, "direction": "short", "confirmed": True},
+                    f"{symbol} SHORT CONFIRMED",
+                    {
+                        "symbol": symbol,
+                        "direction": "short",
+                        "confirmed": True,
+                        "price": f"{current_close:.4f}",
+                        "trigger": f"{trigger_price:.4f}",
+                    },
                 )
+                self._increment_alert_count()
                 await self.stop_breakout_monitor(symbol)
             elif current_close > max_prev:
                 await self.send_webhook(
                     "BREAKOUT",
-                    f"{symbol} SHORT FALSE (REVERSE) | price={current_close:.4f}",
+                    f"{symbol} SHORT FALSE (REVERSE)",
                     {
                         "symbol": symbol,
                         "direction": "short",
                         "confirmed": False,
                         "reason": "reverse",
+                        "price": f"{current_close:.4f}",
                     },
                 )
+                self._increment_alert_count()
                 await self.stop_breakout_monitor(symbol)
             elif count >= 20:
                 await self.send_webhook(
                     "BREAKOUT",
-                    f"{symbol} SHORT FALSE (NO_CONTINUATION) | price={current_close:.4f}",
+                    f"{symbol} SHORT FALSE (NO_CONTINUATION)",
                     {
                         "symbol": symbol,
                         "direction": "short",
                         "confirmed": False,
                         "reason": "no_continuation",
+                        "price": f"{current_close:.4f}",
                     },
                 )
+                self._increment_alert_count()
                 await self.stop_breakout_monitor(symbol)
 
     async def update_klines(self, symbol: str):
         try:
             klines = await self.fetch_klines(
-                symbol, proxy=self.proxy if self.proxy else None
+                symbol, proxy=self.proxy_url if self.proxy_enable else None
             )
             if klines:
                 self.kline_cache[symbol] = klines
@@ -647,6 +859,9 @@ class NotificationService:
         current_price = self.mark_prices.get(symbol)
         if not current_price:
             return
+        last_update = self.mark_price_times.get(symbol, 0)
+        if time.time() - last_update > 300:
+            return
         bm = self.benchmark.get(symbol)
         if not bm:
             return
@@ -680,9 +895,17 @@ class NotificationService:
                     direction = "LONG" if st_state == "11" else "SHORT"
                     await self.send_webhook(
                         "ST",
-                        f"{symbol} {st_state} {direction} | price={current_price:.4f} st1={st1_val:.4f} st2={st2_val:.4f}",
-                        {"symbol": symbol, "state": st_state, "direction": direction},
+                        f"{symbol} {st_state} {direction}",
+                        {
+                            "symbol": symbol,
+                            "state": st_state,
+                            "direction": direction,
+                            "price": f"{current_price:.4f}",
+                            "st1": f"{st1_val:.4f}",
+                            "st2": f"{st2_val:.4f}",
+                        },
                     )
+                    self._increment_alert_count()
                     await self.start_breakout_monitor(
                         symbol, st_state, current_price, bm["kline_time"]
                     )
@@ -697,9 +920,17 @@ class NotificationService:
                     direction = "BULLISH" if vt_state == "11" else "BEARISH"
                     await self.send_webhook(
                         "VT",
-                        f"{symbol} {vt_state} {direction} | ema9={ema_s_val:.4f} ema144={ema_u_val:.4f} ema169={ema_l_val:.4f}",
-                        {"symbol": symbol, "state": vt_state, "direction": direction},
+                        f"{symbol} {vt_state} {direction}",
+                        {
+                            "symbol": symbol,
+                            "state": vt_state,
+                            "direction": direction,
+                            "ema9": f"{ema_s_val:.4f}",
+                            "ema144": f"{ema_u_val:.4f}",
+                            "ema169": f"{ema_l_val:.4f}",
+                        },
                     )
+                    self._increment_alert_count()
 
     async def initialize(self):
         logger.info(f"Initializing klines for {len(self.symbols)} symbols...")
@@ -740,46 +971,116 @@ class NotificationService:
     async def status_loop(self):
         while self.running:
             try:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                logger.info(f"[STATUS] {timestamp}")
-                symbols_copy = list(self.symbols)
-                for symbol in symbols_copy:
-                    try:
-                        current_price = self.mark_prices.get(symbol)
-                        bm = self.benchmark.get(symbol)
-                        if bm:
-                            ema_s = bm["ema_s"]
-                            ema_u = bm["ema_u"]
-                            ema_l = bm["ema_l"]
-                            st1_val = bm["st1"]
-                            st2_val = bm["st2"]
-                            st_state = (
-                                "1"
-                                if current_price and current_price > st1_val
-                                else "0"
-                            ) + (
-                                "1"
-                                if current_price and current_price > st2_val
-                                else "0"
-                            )
-                            vt_state = ("1" if ema_s > ema_u else "0") + (
-                                "1" if ema_s > ema_l else "0"
-                            )
-                            logger.info(
-                                f"[STATUS] {symbol}: Price={format_number(current_price) if current_price is not None else 'N/A'}, ST={st_state}, EMA_S={format_number(ema_s)}, EMA_U={format_number(ema_u)}, EMA_L={format_number(ema_l)}, VT={vt_state}"
-                            )
-                        else:
-                            logger.warning(
-                                f"[STATUS] {symbol}: benchmark not ready (klines insufficient), price={current_price}"
-                            )
-                    except Exception as e:
-                        logger.warning(f"[STATUS] {symbol}: error: {e}")
+                await self._check_and_send_daily_report()
+                if self._status_print_enabled:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(f"[STATUS] {timestamp}")
+                    symbols_copy = list(self.symbols)
+                    for symbol in symbols_copy:
+                        try:
+                            current_price = self.mark_prices.get(symbol)
+                            bm = self.benchmark.get(symbol)
+                            if bm:
+                                ema_s = bm["ema_s"]
+                                ema_u = bm["ema_u"]
+                                ema_l = bm["ema_l"]
+                                st1_val = bm["st1"]
+                                st2_val = bm["st2"]
+                                st_state = (
+                                    "1"
+                                    if current_price and current_price > st1_val
+                                    else "0"
+                                ) + (
+                                    "1"
+                                    if current_price and current_price > st2_val
+                                    else "0"
+                                )
+                                vt_state = ("1" if ema_s > ema_u else "0") + (
+                                    "1" if ema_s > ema_l else "0"
+                                )
+                                logger.info(
+                                    f"[STATUS] {symbol}: Price={format_number(current_price) if current_price is not None else 'N/A'}, ST={st_state}, EMA_S={format_number(ema_s)}, EMA_U={format_number(ema_u)}, EMA_L={format_number(ema_l)}, VT={vt_state}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[STATUS] {symbol}: benchmark not ready (klines insufficient), price={current_price}"
+                                )
+                        except Exception as e:
+                            logger.warning(f"[STATUS] {symbol}: error: {e}")
             except Exception as e:
                 logger.warning(f"[STATUS] loop error: {e}")
             await asyncio.sleep(120)
 
+    async def _check_and_send_daily_report(self):
+        if not self.report_enable:
+            return
+        now = datetime.now()
+        current_time = now.timestamp()
+        current_minute = now.strftime("%H:%M")
+        if current_time - self._last_report_time >= 3600:
+            for report_time in self.report_times:
+                report_hour, report_min = report_time.split(":")
+                current_hour, current_min = current_minute.split(":")
+                if (
+                    current_hour == report_hour
+                    and abs(int(current_min) - int(report_min)) <= 1
+                ):
+                    with self._lock:
+                        alert_count = self._alert_count
+                        self._alert_count = 0
+                    if alert_count > 0:
+                        await self.send_webhook(
+                            "REPORT", f"Alert count in last 24h: {alert_count}"
+                        )
+                        self._last_report_time = current_time
+                        logger.info(
+                            f"[REPORT] Sent daily report, alerts: {alert_count}"
+                        )
+                    break
+
+    def _increment_alert_count(self):
+        with self._lock:
+            self._alert_count += 1
+
+    def _handle_command(self, cmd: str):
+        with self._lock:
+            cmd = cmd.strip().lower()
+            if cmd == "stop print":
+                self._status_print_enabled = False
+                logger.info("[CMD] Status print stopped")
+            elif cmd == "resume print":
+                self._status_print_enabled = True
+                logger.info("[CMD] Status print resumed")
+            elif cmd == "status":
+                logger.info(
+                    f"[CMD] Status print enabled: {self._status_print_enabled}, Alert count: {self._alert_count}"
+                )
+            else:
+                logger.info(
+                    f"[CMD] Unknown command: {cmd}. Available: stop print, resume print, status"
+                )
+
+    def _input_loop(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while self.running:
+                try:
+                    line = input()
+                    if line.strip():
+                        loop.call_soon_threadsafe(lambda: self._handle_command(line))
+                except EOFError:
+                    break
+                except Exception as e:
+                    logger.warning(f"[CMD] Input error: {e}")
+        finally:
+            loop.close()
+
     async def run(self):
         self.running = True
+
+        input_thread = threading.Thread(target=self._input_loop, daemon=True)
+        input_thread.start()
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         config_task = asyncio.create_task(self.config_watch_loop())
         await self.connect()

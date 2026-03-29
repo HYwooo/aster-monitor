@@ -1,6 +1,5 @@
 import asyncio
 import argparse
-import fcntl
 import json
 import math
 import os
@@ -9,6 +8,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 import aiohttp
@@ -152,6 +152,9 @@ class NotificationService:
         )
         self.timezone = self.config.get("settings", {}).get("timezone", "Z")
         self.max_log_lines = self.config.get("settings", {}).get("max_log_lines", 1000)
+        self._webhook_log_handler = RotatingFileHandler(
+            WEBHOOK_LOG_FILE, maxBytes=self.max_log_lines * 200, backupCount=3
+        )
         self.client: Optional[WebSocketClient] = None
         self.mark_prices: dict[str, float] = {}
         self.mark_price_times: dict[str, float] = {}
@@ -179,21 +182,6 @@ class NotificationService:
             return datetime.now().strftime(f"%Y-%m-%dT%H:%M:%S{tz}")
         else:
             return datetime.now().strftime("%Y-%m-%dT%H:%M:%S+00:00")
-
-    def _rotate_webhook_log_if_needed(self):
-        try:
-            if not os.path.exists(WEBHOOK_LOG_FILE):
-                return
-            with open(WEBHOOK_LOG_FILE, "r+", encoding="utf-8") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                lines = f.readlines()
-                if len(lines) > self.max_log_lines:
-                    f.seek(0)
-                    f.truncate()
-                    f.writelines(lines[-self.max_log_lines :])
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        except Exception as e:
-            logger.warning(f"Log rotation failed: {e}")
 
     def _load_config(self, config_path: str) -> dict:
         if not os.path.exists(config_path):
@@ -499,9 +487,8 @@ class NotificationService:
         full_content = f"[{timestamp}] {alert_type}: {message}"
 
         try:
-            self._rotate_webhook_log_if_needed()
-            with open(WEBHOOK_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"[{timestamp}] {full_content}\n")
+            self._webhook_log_handler.write(f"[{timestamp}] {full_content}\n")
+            self._webhook_log_handler.flush()
         except Exception as e:
             logger.warning(f"Write webhook log failed: {e}")
 
@@ -1060,26 +1047,24 @@ class NotificationService:
                     f"[CMD] Unknown command: {cmd}. Available: stop print, resume print, status"
                 )
 
-    def _input_loop(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            while self.running:
-                try:
-                    line = input()
-                    if line.strip():
-                        loop.call_soon_threadsafe(lambda: self._handle_command(line))
-                except EOFError:
-                    break
-                except Exception as e:
-                    logger.warning(f"[CMD] Input error: {e}")
-        finally:
-            loop.close()
+    def _input_loop(self, main_loop):
+        while self.running:
+            try:
+                line = input()
+                if line.strip():
+                    main_loop.call_soon_threadsafe(self._handle_command, line)
+            except EOFError:
+                break
+            except Exception as e:
+                logger.warning(f"[CMD] Input error: {e}")
 
     async def run(self):
         self.running = True
+        main_loop = asyncio.get_running_loop()
 
-        input_thread = threading.Thread(target=self._input_loop, daemon=True)
+        input_thread = threading.Thread(
+            target=self._input_loop, args=(main_loop,), daemon=True
+        )
         input_thread.start()
         heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         config_task = asyncio.create_task(self.config_watch_loop())

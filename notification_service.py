@@ -136,13 +136,13 @@ class NotificationService:
         self.symbols = self.config["symbols"]["monitor_list"]
         self.webhook_url = self.config["webhook"]["url"]
         self.webhook_format = self.config["webhook"].get("format", "card")
-        self.st_period1 = self.config["supertrend"]["period1"]
-        self.st_multiplier1 = self.config["supertrend"]["multiplier1"]
-        self.st_period2 = self.config["supertrend"]["period2"]
-        self.st_multiplier2 = self.config["supertrend"]["multiplier2"]
-        self.vt_ema_signal = self.config["vegas"]["ema_signal"]
-        self.vt_ema_upper = self.config["vegas"]["ema_upper"]
-        self.vt_ema_lower = self.config["vegas"]["ema_lower"]
+        self.st_period1 = self.config.get("supertrend", {}).get("period1", 9)
+        self.st_multiplier1 = self.config.get("supertrend", {}).get("multiplier1", 2.5)
+        self.st_period2 = self.config.get("supertrend", {}).get("period2", 14)
+        self.st_multiplier2 = self.config.get("supertrend", {}).get("multiplier2", 1.7)
+        self.vt_ema_signal = self.config.get("vegas", {}).get("ema_signal", 9)
+        self.vt_ema_upper = self.config.get("vegas", {}).get("ema_upper", 144)
+        self.vt_ema_lower = self.config.get("vegas", {}).get("ema_lower", 169)
         self.heartbeat_file = self.config["service"]["heartbeat_file"]
         self.proxy_enable = self.config.get("proxy", {}).get("enable", False)
         self.proxy_url = self.config.get("proxy", {}).get("url", "")
@@ -236,22 +236,20 @@ class NotificationService:
                 return False
             if "webhook" not in config or "url" not in config["webhook"]:
                 return False
-            if "supertrend" not in config:
-                return False
-            st_keys = ["period1", "multiplier1", "period2", "multiplier2"]
-            if not all(k in config["supertrend"] for k in st_keys):
-                return False
-            if not all(
-                isinstance(config["supertrend"][k], (int, float)) for k in st_keys
-            ):
-                return False
-            if "vegas" not in config:
-                return False
-            vt_keys = ["ema_signal", "ema_upper", "ema_lower"]
-            if not all(k in config["vegas"] for k in vt_keys):
-                return False
-            if not all(isinstance(config["vegas"][k], int) for k in vt_keys):
-                return False
+            if "supertrend" in config:
+                st_keys = ["period1", "multiplier1", "period2", "multiplier2"]
+                if not all(k in config["supertrend"] for k in st_keys):
+                    return False
+                if not all(
+                    isinstance(config["supertrend"][k], (int, float)) for k in st_keys
+                ):
+                    return False
+            if "vegas" in config:
+                vt_keys = ["ema_signal", "ema_upper", "ema_lower"]
+                if not all(k in config["vegas"] for k in vt_keys):
+                    return False
+                if not all(isinstance(config["vegas"][k], int) for k in vt_keys):
+                    return False
             if "service" not in config or "heartbeat_file" not in config["service"]:
                 return False
             heartbeat_dir = os.path.dirname(config["service"]["heartbeat_file"])
@@ -318,13 +316,17 @@ class NotificationService:
             self.symbols = self.config["symbols"]["monitor_list"]
             self.webhook_url = self.config["webhook"]["url"]
             self.webhook_format = self.config["webhook"].get("format", "card")
-            self.st_period1 = self.config["supertrend"]["period1"]
-            self.st_multiplier1 = self.config["supertrend"]["multiplier1"]
-            self.st_period2 = self.config["supertrend"]["period2"]
-            self.st_multiplier2 = self.config["supertrend"]["multiplier2"]
-            self.vt_ema_signal = self.config["vegas"]["ema_signal"]
-            self.vt_ema_upper = self.config["vegas"]["ema_upper"]
-            self.vt_ema_lower = self.config["vegas"]["ema_lower"]
+            self.st_period1 = self.config.get("supertrend", {}).get("period1", 9)
+            self.st_multiplier1 = self.config.get("supertrend", {}).get(
+                "multiplier1", 2.5
+            )
+            self.st_period2 = self.config.get("supertrend", {}).get("period2", 14)
+            self.st_multiplier2 = self.config.get("supertrend", {}).get(
+                "multiplier2", 1.7
+            )
+            self.vt_ema_signal = self.config.get("vegas", {}).get("ema_signal", 9)
+            self.vt_ema_upper = self.config.get("vegas", {}).get("ema_upper", 144)
+            self.vt_ema_lower = self.config.get("vegas", {}).get("ema_lower", 169)
             self.heartbeat_file = self.config["service"]["heartbeat_file"]
             self.proxy_enable = self.config.get("proxy", {}).get("enable", False)
             self.proxy_url = self.config.get("proxy", {}).get("url", "")

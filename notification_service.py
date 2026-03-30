@@ -158,6 +158,8 @@ class NotificationService:
         self.client: Optional[WebSocketClient] = None
         self.mark_prices: dict[str, float] = {}
         self.mark_price_times: dict[str, float] = {}
+        self._pair_components: dict[str, list] = {}
+        self._breakout_comp_prices: dict[str, float] = {}
         self.kline_cache: dict[str, list] = {}
         self.benchmark: dict[str, dict] = {}
         self.last_st_state: dict[str, str] = {}
@@ -165,6 +167,8 @@ class NotificationService:
         self.last_alert_time: dict[str, float] = {}
         self.last_kline_time: dict[str, int] = {}
         self.breakout_monitor: dict[str, dict] = {}
+        self.trailing_stop: dict[str, dict] = {}
+        self.last_atr1h_ch: dict[str, int] = {}
         self.connected = False
         self.running = False
         self.observer: Optional[Observer] = None
@@ -173,6 +177,42 @@ class NotificationService:
         self._alert_count = 0
         self._last_report_time = 0
         self._lock = threading.Lock()
+
+    def _is_pair_trading(self, symbol: str) -> bool:
+        return "/" in symbol
+
+    async def _fetch_pair_klines(
+        self, symbol: str, limit: int, interval: str, proxy: str = None
+    ) -> list:
+        parts = symbol.split("/")
+        klines1 = await self.fetch_klines(parts[0], limit, interval, proxy)
+        klines2 = await self.fetch_klines(parts[1], limit, interval, proxy)
+        if not klines1 or not klines2:
+            return []
+        k2_by_time = {int(k[0]): k for k in klines2}
+        merged = []
+        for k1 in klines1:
+            t = int(k1[0])
+            if t not in k2_by_time:
+                continue
+            k2 = k2_by_time[t]
+            o1, c1 = float(k1[1]), float(k1[4])
+            o2, c2 = float(k2[1]), float(k2[4])
+            if o2 == 0 or c2 == 0:
+                continue
+            ratio_o = o1 / o2
+            ratio_c = c1 / c2
+            merged.append(
+                [
+                    t,
+                    ratio_o,
+                    max(ratio_o, ratio_c),
+                    min(ratio_o, ratio_c),
+                    ratio_c,
+                    float(k1[5]),
+                ]
+            )
+        return sorted(merged, key=lambda x: x[0])
 
     def _get_timestamp(self) -> str:
         tz = self.timezone
@@ -374,7 +414,7 @@ class NotificationService:
                     {"tag": "markdown", "content": f"**Price:** {price}"},
                     {"tag": "markdown", "content": f"**ST1:** {st1} | **ST2:** {st2}"},
                     {"tag": "hr"},
-                    {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                    {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
                 ]
             else:
                 title = f"{emoji} Vegas Tunnel {symbol}"
@@ -389,7 +429,7 @@ class NotificationService:
                         "content": f"**EMA144:** {ema144} | **EMA169:** {ema169}",
                     },
                     {"tag": "hr"},
-                    {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                    {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
                 ]
 
         elif alert_type == "BREAKOUT":
@@ -416,7 +456,7 @@ class NotificationService:
                 {"tag": "markdown", "content": f"**Trigger:** {trigger}"},
                 {"tag": "markdown", "content": f"**Status:** {status}"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
             ]
             title = f"{emoji} Breakout {symbol} {status}"
 
@@ -426,7 +466,7 @@ class NotificationService:
             elements = [
                 {"tag": "markdown", "content": f"**{message}**"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
             ]
 
         elif alert_type == "ERROR":
@@ -435,7 +475,7 @@ class NotificationService:
             elements = [
                 {"tag": "markdown", "content": f"**{message}**"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
             ]
 
         elif alert_type == "CONFIG":
@@ -444,7 +484,7 @@ class NotificationService:
             elements = [
                 {"tag": "markdown", "content": f"**{message}**"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
             ]
 
         elif alert_type == "CONFIG ERROR":
@@ -453,7 +493,7 @@ class NotificationService:
             elements = [
                 {"tag": "markdown", "content": f"**{message}**"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
             ]
 
         elif alert_type == "REPORT":
@@ -462,7 +502,7 @@ class NotificationService:
             elements = [
                 {"tag": "markdown", "content": f"**{message}**"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
             ]
 
         else:
@@ -471,7 +511,7 @@ class NotificationService:
             elements = [
                 {"tag": "markdown", "content": f"**{message}**"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** `{timestamp}`"},
+                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
             ]
 
         return {
@@ -547,6 +587,12 @@ class NotificationService:
             await self.send_webhook("SYSTEM", f"WebSocket disconnected: {error}")
 
     async def subscribe_symbol(self, symbol: str):
+        if self._is_pair_trading(symbol):
+            await self._subscribe_pair_trading(symbol)
+        else:
+            await self._subscribe_single_symbol(symbol)
+
+    async def _subscribe_single_symbol(self, symbol: str):
         @self.client.on_ticker(symbol)
         async def on_ticker(data):
             try:
@@ -554,6 +600,7 @@ class NotificationService:
                 if price > 0:
                     self.mark_prices[symbol] = price
                     self.mark_price_times[symbol] = time.time()
+                await self.check_trailing_stop(symbol, price)
                 await self.check_signals(symbol)
             except Exception as e:
                 self.warn(f"ticker callback error: {e}", f"symbol={symbol}")
@@ -566,10 +613,79 @@ class NotificationService:
             except Exception as e:
                 self.warn(f"kline callback error: {e}", f"symbol={symbol}")
 
+        @self.client.on_kline(symbol, "15m")
+        async def on_15m_kline(kline):
+            try:
+                if kline.get("x", False):
+                    await self.update_15m_atr(symbol, kline)
+            except Exception as e:
+                self.warn(f"15m kline callback error: {e}", f"symbol={symbol}")
+
         logger.info(f"Subscribed to {symbol}")
 
+    async def _subscribe_pair_trading(self, symbol: str):
+        parts = symbol.split("/")
+        symbol1, symbol2 = parts[0], parts[1]
+        self._pair_components[symbol] = [symbol1, symbol2]
+
+        def make_ticker_callback(pair_symbol, comp1, comp2):
+            async def on_ticker(data):
+                try:
+                    price = float(data.get("c", data.get("lastPrice", 0)))
+                    if price > 0:
+                        self.mark_prices[comp1] = price
+                        self.mark_price_times[comp1] = time.time()
+                    p1 = self.mark_prices.get(comp1, 0)
+                    p2 = self.mark_prices.get(comp2, 0)
+                    if p1 > 0 and p2 > 0:
+                        pair_price = p1 / p2
+                        self.mark_prices[pair_symbol] = pair_price
+                        self.mark_price_times[pair_symbol] = time.time()
+                        await self.check_trailing_stop(pair_symbol, pair_price)
+                    await self.check_signals(pair_symbol)
+                except Exception as e:
+                    self.warn(f"pair ticker callback error: {e}", f"pair={pair_symbol}")
+
+            return on_ticker
+
+        self.client.on_ticker(symbol1)(make_ticker_callback(symbol, symbol1, symbol2))
+        self.client.on_ticker(symbol2)(make_ticker_callback(symbol, symbol1, symbol2))
+
+        @self.client.on_kline(symbol1, "1h")
+        async def on_kline(kline):
+            try:
+                if kline.get("x", False):
+                    await self.update_klines(symbol)
+            except Exception as e:
+                self.warn(f"pair kline callback error: {e}", f"pair={symbol}")
+
+        @self.client.on_kline(symbol1, "15m")
+        async def on_15m_kline(kline):
+            try:
+                if kline.get("x", False):
+                    await self.update_15m_atr(symbol, kline)
+            except Exception as e:
+                self.warn(f"pair 15m kline callback error: {e}", f"pair={symbol}")
+
+        @self.client.on_kline(symbol2, "15m")
+        async def on_15m_kline2(kline):
+            try:
+                if kline.get("x", False):
+                    await self.update_15m_atr(symbol, kline)
+            except Exception as e:
+                self.warn(f"pair 15m kline2 callback error: {e}", f"pair={symbol}")
+
+        logger.info(f"Subscribed to PairTrading {symbol} ({symbol1}/{symbol2})")
+
     async def subscribe_all_tickers(self):
-        params = [f"{symbol.lower()}@ticker" for symbol in self.symbols]
+        params = []
+        for sym in self.symbols:
+            if self._is_pair_trading(sym):
+                parts = sym.split("/")
+                params.append(f"{parts[0].lower()}@ticker")
+                params.append(f"{parts[1].lower()}@ticker")
+            else:
+                params.append(f"{sym.lower()}@ticker")
         await self.client.subscribe_batch(params)
         logger.info(f"Batch subscribed to {len(params)} tickers")
 
@@ -632,15 +748,174 @@ class NotificationService:
         ema_lower = talib.EMA(close, timeperiod=self.vt_ema_lower)
         return ema_signal, ema_upper, ema_lower
 
+    def calculate_dema(self, data, period):
+        ema1 = talib.EMA(data, timeperiod=period)
+        ema2 = talib.EMA(ema1, timeperiod=period)
+        return 2 * ema1 - ema2
+
+    def calculate_hma(self, data, period):
+        return talib.WMA(
+            2 * talib.WMA(data, period // 2) - talib.WMA(data, period),
+            int(math.sqrt(period)),
+        )
+
+    def calculate_tr(self, high, low, close):
+        prev_close = np.roll(close, 1)
+        prev_close[0] = close[0]
+        tr1 = high - low
+        tr2 = np.abs(high - prev_close)
+        tr3 = np.abs(low - prev_close)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
+
+    def calculate_atr(self, high, low, close, period, ma_type="DEMA"):
+        tr = self.calculate_tr(high, low, close)
+        if ma_type == "DEMA":
+            atr = self.calculate_dema(tr, period)
+        elif ma_type == "HMA":
+            atr = self.calculate_hma(tr, period)
+        elif ma_type == "EMA":
+            atr = talib.EMA(tr, period)
+        elif ma_type == "SMA":
+            atr = talib.SMA(tr, period)
+        elif ma_type == "WMA":
+            atr = talib.WMA(tr, period)
+        else:
+            atr = talib.EMA(tr, period)
+        return atr
+
+    def run_atr_channel(self, close, atr, mult, prev_state):
+        upper_band, lower_band, ch_state = prev_state
+        if math.isnan(atr) or atr <= 0:
+            return upper_band, lower_band, ch_state
+        if math.isnan(upper_band) or math.isnan(lower_band):
+            width = atr * mult
+            upper_band = close + width / 2
+            lower_band = close - width / 2
+            ch_state = 0
+        elif close > upper_band:
+            width = atr * mult
+            new_upper = close
+            new_lower = close - width
+            lower_band = max(lower_band, new_lower)
+            upper_band = new_upper
+            ch_state = 1
+        elif close < lower_band:
+            width = atr * mult
+            new_lower = close
+            new_upper = close + width
+            upper_band = min(upper_band, new_upper)
+            lower_band = new_lower
+            ch_state = -1
+        return upper_band, lower_band, ch_state
+
+    async def update_15m_atr(self, symbol, kline):
+        try:
+            if symbol not in self.trailing_stop or not self.trailing_stop[symbol].get(
+                "active"
+            ):
+                return
+            o, h, l, c = (
+                float(kline.get("o", 0)),
+                float(kline.get("h", 0)),
+                float(kline.get("l", 0)),
+                float(kline.get("c", 0)),
+            )
+            if c == 0:
+                return
+            if self._is_pair_trading(symbol):
+                parts = symbol.split("/")
+                comp1, comp2 = parts[0], parts[1]
+                c1 = self.mark_prices.get(comp1, 0)
+                c2 = self.mark_prices.get(comp2, 0)
+                if c1 == 0 or c2 == 0:
+                    return
+                c = c1 / c2
+                h_ratio = max(o, c) if o > 0 else c
+                l_ratio = min(o, c) if o > 0 else c
+                atr = self.calculate_atr(
+                    np.array([h_ratio]), np.array([l_ratio]), np.array([c]), 14, "HMA"
+                )[0]
+            else:
+                atr = self.calculate_atr(
+                    np.array([h]), np.array([l]), np.array([c]), 14, "HMA"
+                )[0]
+            if math.isnan(atr) or atr <= 0:
+                return
+            ts = self.trailing_stop[symbol]
+            prev_state = ts.get("atr15m_state", (float("nan"), float("nan"), 0))
+            upper, lower, ch = self.run_atr_channel(c, atr, ts["atr_mult"], prev_state)
+            ts["atr15m_upper"] = upper
+            ts["atr15m_lower"] = lower
+            ts["atr15m_state"] = (upper, lower, ch)
+        except Exception as e:
+            self.warn(f"update_15m_atr error for {symbol}: {e}")
+        except Exception as e:
+            self.warn(f"update_15m_atr error for {symbol}: {e}")
+
+    async def check_trailing_stop(self, symbol, current_price):
+        if not current_price or current_price <= 0:
+            return
+        if symbol not in self.trailing_stop:
+            return
+        ts = self.trailing_stop[symbol]
+        if not ts.get("active"):
+            return
+        try:
+            upper = ts.get("atr15m_upper", 0)
+            lower = ts.get("atr15m_lower", 0)
+            direction = ts.get("direction", "")
+            if direction == "LONG" and lower > 0 and current_price < lower:
+                await self.send_webhook(
+                    "ST",
+                    f"[{symbol}] TRAILING STOP",
+                    {
+                        "symbol": symbol,
+                        "direction": "LONG",
+                        "price": format_number(current_price),
+                        "stop_line": format_number(lower),
+                        "entry_price": format_number(ts.get("entry_price", 0)),
+                        "reason": "trailing_stop",
+                    },
+                )
+                self._increment_alert_count()
+                ts["active"] = False
+                logger.info(f"Trailing stop hit for {symbol} at {lower}")
+            elif direction == "SHORT" and upper > 0 and current_price > upper:
+                await self.send_webhook(
+                    "ST",
+                    f"[{symbol}] TRAILING STOP",
+                    {
+                        "symbol": symbol,
+                        "direction": "SHORT",
+                        "price": format_number(current_price),
+                        "stop_line": format_number(upper),
+                        "entry_price": format_number(ts.get("entry_price", 0)),
+                        "reason": "trailing_stop",
+                    },
+                )
+                self._increment_alert_count()
+                ts["active"] = False
+                logger.info(f"Trailing stop hit for {symbol} at {upper}")
+        except Exception as e:
+            self.warn(f"check_trailing_stop error for {symbol}: {e}")
+
     async def start_breakout_monitor(self, symbol, direction, price, trigger_time):
         if symbol in self.breakout_monitor:
             return
-        history = await self.fetch_klines(
-            symbol,
-            limit=20,
-            interval="15m",
-            proxy=self.proxy_url if self.proxy_enable else None,
-        )
+        if self._is_pair_trading(symbol):
+            history = await self._fetch_pair_klines(
+                symbol,
+                limit=20,
+                interval="15m",
+                proxy=self.proxy_url if self.proxy_enable else None,
+            )
+        else:
+            history = await self.fetch_klines(
+                symbol,
+                limit=20,
+                interval="15m",
+                proxy=self.proxy_url if self.proxy_enable else None,
+            )
         if not history:
             self.warn(f"Failed to fetch 15m history for {symbol}", "breakout")
             return
@@ -652,9 +927,23 @@ class NotificationService:
             "klines_15m": history,
         }
 
-        @self.client.on_kline(symbol, "15m")
-        async def on_15m_kline(kline):
-            await self.on_15m_kline(symbol, kline)
+        if self._is_pair_trading(symbol):
+            parts = symbol.split("/")
+            self._breakout_comp_prices[parts[0]] = 0
+            self._breakout_comp_prices[parts[1]] = 0
+
+            @self.client.on_kline(parts[0], "15m")
+            async def on_15m_kline_p1(kline):
+                await self.on_15m_kline(symbol, kline, parts[0], parts[1])
+
+            @self.client.on_kline(parts[1], "15m")
+            async def on_15m_kline_p2(kline):
+                await self.on_15m_kline(symbol, kline, parts[0], parts[1])
+        else:
+
+            @self.client.on_kline(symbol, "15m")
+            async def on_15m_kline(kline):
+                await self.on_15m_kline(symbol, kline)
 
         logger.info(f"Breakout monitor started for {symbol}, direction={direction}")
 
@@ -663,13 +952,30 @@ class NotificationService:
             del self.breakout_monitor[symbol]
             logger.info(f"Breakout monitor stopped for {symbol}")
 
-    async def on_15m_kline(self, symbol, kline):
+    async def on_15m_kline(self, symbol, kline, comp1=None, comp2=None):
         if symbol not in self.breakout_monitor:
             return
         try:
             monitor = self.breakout_monitor[symbol]
-            kline_close = float(kline.get("c", 0))
-            monitor["klines_15m"].append([int(kline.get("t", 0)), 0, kline_close])
+            t = int(kline.get("t", 0))
+            if self._is_pair_trading(symbol):
+                if comp1 is None or comp2 is None:
+                    return
+                c = float(kline.get("c", 0))
+                if c == 0:
+                    return
+                other_comp = comp2 if comp1 == symbol.split("/")[0] else comp1
+                other_price = self._breakout_comp_prices.get(other_comp, 0)
+                if other_price == 0:
+                    self._breakout_comp_prices[comp1] = c
+                    return
+                ratio_close = c / other_price
+                self._breakout_comp_prices[comp1] = 0
+                self._breakout_comp_prices[comp2] = 0
+                monitor["klines_15m"].append([t, 0, ratio_close])
+            else:
+                kline_close = float(kline.get("c", 0))
+                monitor["klines_15m"].append([t, 0, kline_close])
             if len(monitor["klines_15m"]) > 20:
                 monitor["klines_15m"] = monitor["klines_15m"][-20:]
             monitor["kline_15m_count"] += 1
@@ -702,8 +1008,8 @@ class NotificationService:
                         "symbol": symbol,
                         "direction": "long",
                         "confirmed": True,
-                        "price": f"{current_close:.4f}",
-                        "trigger": f"{trigger_price:.4f}",
+                        "price": format_number(current_close),
+                        "trigger": format_number(trigger_price),
                     },
                 )
                 self._increment_alert_count()
@@ -717,7 +1023,7 @@ class NotificationService:
                         "direction": "long",
                         "confirmed": False,
                         "reason": "reverse",
-                        "price": f"{current_close:.4f}",
+                        "price": format_number(current_close),
                     },
                 )
                 self._increment_alert_count()
@@ -731,7 +1037,7 @@ class NotificationService:
                         "direction": "long",
                         "confirmed": False,
                         "reason": "no_continuation",
-                        "price": f"{current_close:.4f}",
+                        "price": format_number(current_close),
                     },
                 )
                 self._increment_alert_count()
@@ -746,8 +1052,8 @@ class NotificationService:
                         "symbol": symbol,
                         "direction": "short",
                         "confirmed": True,
-                        "price": f"{current_close:.4f}",
-                        "trigger": f"{trigger_price:.4f}",
+                        "price": format_number(current_close),
+                        "trigger": format_number(trigger_price),
                     },
                 )
                 self._increment_alert_count()
@@ -761,7 +1067,7 @@ class NotificationService:
                         "direction": "short",
                         "confirmed": False,
                         "reason": "reverse",
-                        "price": f"{current_close:.4f}",
+                        "price": format_number(current_close),
                     },
                 )
                 self._increment_alert_count()
@@ -775,7 +1081,7 @@ class NotificationService:
                         "direction": "short",
                         "confirmed": False,
                         "reason": "no_continuation",
-                        "price": f"{current_close:.4f}",
+                        "price": format_number(current_close),
                     },
                 )
                 self._increment_alert_count()
@@ -783,9 +1089,14 @@ class NotificationService:
 
     async def update_klines(self, symbol: str):
         try:
-            klines = await self.fetch_klines(
-                symbol, proxy=self.proxy_url if self.proxy_enable else None
-            )
+            if self._is_pair_trading(symbol):
+                klines = await self._fetch_pair_klines(
+                    symbol, proxy=self.proxy_url if self.proxy_enable else None
+                )
+            else:
+                klines = await self.fetch_klines(
+                    symbol, proxy=self.proxy_url if self.proxy_enable else None
+                )
             if klines:
                 self.kline_cache[symbol] = klines
                 last_time = self.last_kline_time.get(symbol, 0)
@@ -802,8 +1113,13 @@ class NotificationService:
             return
         try:
             close = np.array([float(k[4]) for k in klines], dtype=float)
-            high = np.array([float(k[2]) for k in klines], dtype=float)
-            low = np.array([float(k[3]) for k in klines], dtype=float)
+            if self._is_pair_trading(symbol):
+                open_arr = np.array([float(k[1]) for k in klines], dtype=float)
+                high = np.maximum(open_arr, close)
+                low = np.minimum(open_arr, close)
+            else:
+                high = np.array([float(k[2]) for k in klines], dtype=float)
+                low = np.array([float(k[3]) for k in klines], dtype=float)
             st1 = self.calculate_supertrend(
                 high, low, close, self.st_period1, self.st_multiplier1
             )
@@ -811,6 +1127,16 @@ class NotificationService:
                 high, low, close, self.st_period2, self.st_multiplier2
             )
             ema_s, ema_u, ema_l = self.calculate_vegas_tunnel(close)
+            atr1h = self.calculate_atr(high, low, close, 14, "DEMA")
+            prev_atr_state = self.benchmark.get(symbol, {}).get(
+                "atr1h_state", (float("nan"), float("nan"), 0)
+            )
+            for i in range(len(close)):
+                upper, lower, ch = self.run_atr_channel(
+                    close[i], atr1h[i], 1.7, prev_atr_state
+                )
+                prev_atr_state = (upper, lower, ch)
+            atr1h_upper, atr1h_lower, atr1h_ch = prev_atr_state
             st1_val, st2_val = float(st1[-1]), float(st2[-1])
             ema_s_val, ema_u_val, ema_l_val = (
                 float(ema_s[-1]),
@@ -830,6 +1156,10 @@ class NotificationService:
                 "ema_u": ema_u_val,
                 "ema_l": ema_l_val,
                 "kline_time": int(klines[-1][0]),
+                "atr1h_upper": float(atr1h_upper) if not math.isnan(atr1h_upper) else 0,
+                "atr1h_lower": float(atr1h_lower) if not math.isnan(atr1h_lower) else 0,
+                "atr1h_ch": atr1h_ch,
+                "atr1h_state": prev_atr_state,
             }
         except Exception as e:
             self.warn(f"recalculate_states error for {symbol}: {e}")
@@ -872,30 +1202,37 @@ class NotificationService:
 
         now = time.time()
 
-        if st_state != self.last_st_state.get(symbol):
-            old_state = self.last_st_state.get(symbol, "??")
-            self.last_st_state[symbol] = st_state
-            if st_state in ["11", "00"] and old_state not in ["11", "00"]:
-                last_alert = self.last_alert_time.get(f"ST_{symbol}", 0)
-                if now - last_alert > 3600:
-                    self.last_alert_time[f"ST_{symbol}"] = now
-                    direction = "LONG" if st_state == "11" else "SHORT"
-                    await self.send_webhook(
-                        "ST",
-                        f"{symbol} {st_state} {direction}",
-                        {
-                            "symbol": symbol,
-                            "state": st_state,
-                            "direction": direction,
-                            "price": f"{current_price:.4f}",
-                            "st1": f"{st1_val:.4f}",
-                            "st2": f"{st2_val:.4f}",
-                        },
-                    )
-                    self._increment_alert_count()
-                    await self.start_breakout_monitor(
-                        symbol, st_state, current_price, bm["kline_time"]
-                    )
+        atr1h_ch = bm.get("atr1h_ch", 0)
+        prev_atr_ch = self.last_atr1h_ch.get(symbol, 0)
+        self.last_atr1h_ch[symbol] = atr1h_ch
+
+        if prev_atr_ch != 0 and atr1h_ch != prev_atr_ch:
+            last_alert = self.last_alert_time.get(f"ST_{symbol}", 0)
+            if now - last_alert > 3600:
+                self.last_alert_time[f"ST_{symbol}"] = now
+                direction = "LONG" if atr1h_ch == 1 else "SHORT"
+                await self.send_webhook(
+                    "ST",
+                    f"[{symbol}] {direction}",
+                    {
+                        "symbol": symbol,
+                        "direction": direction,
+                        "price": format_number(current_price),
+                        "atr_upper": format_number(bm.get("atr1h_upper", 0)),
+                        "atr_lower": format_number(bm.get("atr1h_lower", 0)),
+                    },
+                )
+                self._increment_alert_count()
+                self.trailing_stop[symbol] = {
+                    "direction": direction,
+                    "entry_price": current_price,
+                    "entry_time": now,
+                    "atr_mult": 1.618,
+                    "atr15m_upper": 0,
+                    "atr15m_lower": 0,
+                    "atr15m_state": (float("nan"), float("nan"), 0),
+                    "active": True,
+                }
 
         if vt_state != self.last_vt_state.get(symbol):
             old_state = self.last_vt_state.get(symbol, "??")
@@ -912,9 +1249,9 @@ class NotificationService:
                             "symbol": symbol,
                             "state": vt_state,
                             "direction": direction,
-                            "ema9": f"{ema_s_val:.4f}",
-                            "ema144": f"{ema_u_val:.4f}",
-                            "ema169": f"{ema_l_val:.4f}",
+                            "ema9": format_number(ema_s_val),
+                            "ema144": format_number(ema_u_val),
+                            "ema169": format_number(ema_l_val),
                         },
                     )
                     self._increment_alert_count()

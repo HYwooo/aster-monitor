@@ -3,18 +3,7 @@ url = "https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-here"
 format = "card"
 
 [symbols]
-monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "XAUUSDT"]
-
-[supertrend]
-period1 = 9
-multiplier1 = 2.5
-period2 = 14
-multiplier2 = 1.7
-
-[vegas]
-ema_signal = 9
-ema_upper = 144
-ema_lower = 169
+monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "ETHUSDT/BTCUSDT"]
 
 [service]
 heartbeat_file = "notification_heartbeat"
@@ -29,5 +18,5 @@ enable = false
 times = ["08:00", "20:00"]
 
 [settings]
-timezone = "Z"       # Z=UTC+0, "+08:00"=UTC+8, "-05:00"=UTC-5
+timezone = "Z"
 max_log_lines = 1000

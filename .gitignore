@@ -3,7 +3,7 @@
 *.local
 *.pid
 .env
-notification_heartbeat
+heartbeat
 __pycache__/
 *.pyc
 *.pyo

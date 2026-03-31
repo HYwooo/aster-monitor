@@ -11,5 +11,5 @@ if [ -f notification_service.pid ]; then
     rm -f notification_service.pid
 else
     echo "PID file not found, trying to kill by process name..."
-    pkill -f "python3 notification_service.py" && echo "Service stopped" || echo "Service not found"
+    pkill -f "python notification_service.py" && echo "Service stopped" || echo "Service not found"
 fi

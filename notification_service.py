@@ -1229,29 +1229,56 @@ class NotificationService:
 
         now = time.time()
 
-        atr1h_ch = bm.get("atr1h_ch", 0)
-        prev_atr_ch = self.last_atr1h_ch.get(symbol, 0)
-        self.last_atr1h_ch[symbol] = atr1h_ch
+        atr1h_upper = bm.get("atr1h_upper", 0)
+        atr1h_lower = bm.get("atr1h_lower", 0)
+        prev_atr_state = self.last_atr_state.get(symbol, {"ch": 0, "sent": None})
 
-        if prev_atr_ch != 0 and atr1h_ch != prev_atr_ch:
+        if current_price >= atr1h_upper and prev_atr_state["ch"] != 1:
             last_alert = self.last_alert_time.get(f"ST_{symbol}", 0)
             if now - last_alert > 3600:
                 self.last_alert_time[f"ST_{symbol}"] = now
-                direction = "LONG" if atr1h_ch == 1 else "SHORT"
+                self.last_atr_state[symbol] = {"ch": 1, "sent": "LONG"}
                 await self.send_webhook(
                     "ST",
-                    f"[{symbol}] {direction}",
+                    f"[{symbol}] LONG",
                     {
                         "symbol": symbol,
-                        "direction": direction,
+                        "direction": "long",
                         "price": format_number(current_price),
-                        "atr_upper": format_number(bm.get("atr1h_upper", 0)),
-                        "atr_lower": format_number(bm.get("atr1h_lower", 0)),
+                        "atr_upper": format_number(atr1h_upper),
+                        "atr_lower": format_number(atr1h_lower),
                     },
                 )
                 self._increment_alert_count()
                 self.trailing_stop[symbol] = {
-                    "direction": direction,
+                    "direction": "long",
+                    "entry_price": current_price,
+                    "entry_time": now,
+                    "atr_mult": self.atr15m_mult,
+                    "atr15m_upper": 0,
+                    "atr15m_lower": 0,
+                    "atr15m_state": (float("nan"), float("nan"), 0),
+                    "active": True,
+                }
+        elif current_price <= atr1h_lower and prev_atr_state["ch"] != -1:
+            last_alert = self.last_alert_time.get(f"ST_{symbol}", 0)
+            if now - last_alert > 3600:
+                self.last_alert_time[f"ST_{symbol}"] = now
+                self.last_atr_state[symbol] = {"ch": -1, "sent": "SHORT"}
+                await self.send_webhook(
+                    "ST",
+                    f"[{symbol}] SHORT",
+                    {
+                        "symbol": symbol,
+                        "direction": "short",
+                        "price": format_number(current_price),
+                        "atr_upper": format_number(atr1h_upper),
+                        "atr_lower": format_number(atr1h_lower),
+                    },
+                )
+                self._increment_alert_count()
+                self.trailing_stop[symbol] = {
+                    "direction": "short",
                     "entry_price": current_price,
                     "entry_time": now,
                     "atr_mult": self.atr15m_mult,

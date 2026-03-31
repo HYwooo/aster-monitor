@@ -27,7 +27,7 @@ if [ $ELAPSED -gt $TIMEOUT ]; then
         rm -f notification_service.pid
     fi
 
-    nohup python3 notification_service.py >> notification_service.log 2>&1 &
+    nohup python notification_service.py >> notification_service.log 2>&1 &
     NEW_PID=$!
     echo $NEW_PID > notification_service.pid
     echo "[$(date)] Service restarted, new PID: $NEW_PID"

@@ -8,7 +8,6 @@ import threading
 import time
 import traceback
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 import aiohttp
@@ -158,9 +157,6 @@ class NotificationService:
         )
         self.timezone = self.config.get("settings", {}).get("timezone", "Z")
         self.max_log_lines = self.config.get("settings", {}).get("max_log_lines", 1000)
-        self._webhook_log_handler = RotatingFileHandler(
-            WEBHOOK_LOG_FILE, maxBytes=self.max_log_lines * 200, backupCount=3
-        )
         self.client: Optional[WebSocketClient] = None
         self.mark_prices: dict[str, float] = {}
         self.mark_price_times: dict[str, float] = {}
@@ -169,7 +165,7 @@ class NotificationService:
         self.kline_cache: dict[str, list] = {}
         self.benchmark: dict[str, dict] = {}
         self.last_st_state: dict[str, str] = {}
-        self.last_vt_state: dict[str, str] = {}
+        self.last_atr_state: dict[str, dict] = {}
         self.last_alert_time: dict[str, float] = {}
         self.last_kline_time: dict[str, int] = {}
         self.breakout_monitor: dict[str, dict] = {}
@@ -183,12 +179,25 @@ class NotificationService:
         self._alert_count = 0
         self._last_report_time = 0
         self._lock = threading.Lock()
+        self._pending_status: set = set()
 
     def _is_pair_trading(self, symbol: str) -> bool:
         return "/" in symbol
 
+    def _rotate_webhook_log_if_needed(self):
+        try:
+            if not os.path.exists(WEBHOOK_LOG_FILE):
+                return
+            with open(WEBHOOK_LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if len(lines) > self.max_log_lines:
+                with open(WEBHOOK_LOG_FILE, "w", encoding="utf-8") as f:
+                    f.writelines(lines[-self.max_log_lines :])
+        except Exception as e:
+            logger.warning(f"Log rotation failed: {e}")
+
     async def _fetch_pair_klines(
-        self, symbol: str, limit: int, interval: str, proxy: str = None
+        self, symbol: str, limit: int = 500, interval: str = "1h", proxy: str = None
     ) -> list:
         parts = symbol.split("/")
         klines1 = await self.fetch_klines(parts[0], limit, interval, proxy)
@@ -544,8 +553,9 @@ class NotificationService:
         full_content = f"[{timestamp}] {alert_type}: {message}"
 
         try:
-            self._webhook_log_handler.write(f"[{timestamp}] {full_content}\n")
-            self._webhook_log_handler.flush()
+            self._rotate_webhook_log_if_needed()
+            with open(WEBHOOK_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {full_content}\n")
         except Exception as e:
             logger.warning(f"Write webhook log failed: {e}")
 
@@ -559,7 +569,20 @@ class NotificationService:
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.webhook_url, json=msg, timeout=10) as resp:
                     if resp.status == 200:
-                        logger.info(f"Webhook sent: {alert_type}")
+                        extra = extra or {}
+                        direction = extra.get("direction", "").upper()
+                        price = extra.get("price", "")
+                        atr_upper = extra.get("atr_upper", "")
+                        atr_lower = extra.get("atr_lower", "")
+                        stop_line = extra.get("stop_line", "")
+                        entry_price = extra.get("entry_price", "")
+                        reason = extra.get("reason", "")
+
+                        if reason == "trailing_stop":
+                            log_msg = f"[WEBHOOK] {message} | Price={price} | Stop={stop_line} | Entry={entry_price}"
+                        else:
+                            log_msg = f"[WEBHOOK] {message} | Price={price} | Channel={atr_lower}~{atr_upper}"
+                        logger.info(log_msg)
                     else:
                         log_error(f"Webhook failed: {resp.status}")
         except Exception as e:
@@ -645,28 +668,20 @@ class NotificationService:
         symbol1, symbol2 = parts[0], parts[1]
         self._pair_components[symbol] = [symbol1, symbol2]
 
-        def make_ticker_callback(pair_symbol, comp1, comp2):
-            async def on_ticker(data):
-                try:
-                    price = float(data.get("c", data.get("lastPrice", 0)))
-                    if price > 0:
-                        self.mark_prices[comp1] = price
-                        self.mark_price_times[comp1] = time.time()
-                    p1 = self.mark_prices.get(comp1, 0)
-                    p2 = self.mark_prices.get(comp2, 0)
-                    if p1 > 0 and p2 > 0:
-                        pair_price = p1 / p2
-                        self.mark_prices[pair_symbol] = pair_price
-                        self.mark_price_times[pair_symbol] = time.time()
-                        await self.check_trailing_stop(pair_symbol, pair_price)
-                    await self.check_signals(pair_symbol)
-                except Exception as e:
-                    self.warn(f"pair ticker callback error: {e}", f"pair={pair_symbol}")
+        async def on_ticker(data):
+            try:
+                ticker_sym = data.get("s", "").upper()
+                price = float(data.get("c", data.get("lastPrice", 0)))
+                if price <= 0:
+                    return
+                self.mark_prices[ticker_sym] = price
+                self.mark_price_times[ticker_sym] = time.time()
+                await self._update_pair_price(symbol, symbol1, symbol2)
+            except Exception as e:
+                self.warn(f"pair ticker error: {e}", f"pair={symbol}")
 
-            return on_ticker
-
-        self.client.on_ticker(symbol1)(make_ticker_callback(symbol, symbol1, symbol2))
-        self.client.on_ticker(symbol2)(make_ticker_callback(symbol, symbol1, symbol2))
+        self.client.on_ticker(symbol1)(on_ticker)
+        self.client.on_ticker(symbol2)(on_ticker)
 
         @self.client.on_kline(symbol1, "1h")
         async def on_kline(kline):
@@ -674,7 +689,7 @@ class NotificationService:
                 if kline.get("x", False):
                     await self.update_klines(symbol)
             except Exception as e:
-                self.warn(f"pair kline callback error: {e}", f"pair={symbol}")
+                self.warn(f"pair kline error: {e}", f"pair={symbol}")
 
         @self.client.on_kline(symbol1, "15m")
         async def on_15m_kline(kline):
@@ -682,7 +697,7 @@ class NotificationService:
                 if kline.get("x", False):
                     await self.update_15m_atr(symbol, kline)
             except Exception as e:
-                self.warn(f"pair 15m kline callback error: {e}", f"pair={symbol}")
+                self.warn(f"pair 15m kline error: {e}", f"pair={symbol}")
 
         @self.client.on_kline(symbol2, "15m")
         async def on_15m_kline2(kline):
@@ -690,7 +705,7 @@ class NotificationService:
                 if kline.get("x", False):
                     await self.update_15m_atr(symbol, kline)
             except Exception as e:
-                self.warn(f"pair 15m kline2 callback error: {e}", f"pair={symbol}")
+                self.warn(f"pair 15m kline2 error: {e}", f"pair={symbol}")
 
         logger.info(f"Subscribed to PairTrading {symbol} ({symbol1}/{symbol2})")
 
@@ -725,6 +740,91 @@ class NotificationService:
         except Exception as e:
             self.warn(f"fetch_klines error for {symbol}: {e}")
             return []
+
+    async def fetch_ticker_price(self, symbol: str, proxy: str = None) -> float:
+        try:
+            url = f"https://fapi.asterdex.com/fapi/v1/ticker/price?symbol={symbol}"
+            kwargs = {}
+            if proxy:
+                kwargs["proxy"] = proxy
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10, **kwargs) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return float(data.get("price", 0))
+                    else:
+                        return 0
+        except Exception:
+            return 0
+
+    async def _update_pair_price(self, symbol: str, symbol1: str, symbol2: str):
+        p1 = self.mark_prices.get(symbol1, 0)
+        p2 = self.mark_prices.get(symbol2, 0)
+        if p1 <= 0 or p2 <= 0:
+            p1_fallback = await self.fetch_ticker_price(
+                symbol1, self.proxy_url if self.proxy_enable else None
+            )
+            p2_fallback = await self.fetch_ticker_price(
+                symbol2, self.proxy_url if self.proxy_enable else None
+            )
+            if p1_fallback > 0:
+                self.mark_prices[symbol1] = p1_fallback
+                self.mark_price_times[symbol1] = time.time()
+                p1 = p1_fallback
+            if p2_fallback > 0:
+                self.mark_prices[symbol2] = p2_fallback
+                self.mark_price_times[symbol2] = time.time()
+                p2 = p2_fallback
+        if p1 > 0 and p2 > 0:
+            pair_price = p1 / p2
+            self.mark_prices[symbol] = pair_price
+            self.mark_price_times[symbol] = time.time()
+            await self.check_trailing_stop(symbol, pair_price)
+            await self.check_signals(symbol)
+
+    async def _poll_prices(self):
+        proxy = self.proxy_url if self.proxy_enable else None
+        while self.running:
+            try:
+                current_time = time.time()
+                for sym in self.symbols:
+                    last_update = self.mark_price_times.get(sym, 0)
+                    if current_time - last_update > 5:
+                        price = await self.fetch_ticker_price(sym, proxy)
+                        if price > 0:
+                            self.mark_prices[sym] = price
+                            self.mark_price_times[sym] = current_time
+                            if sym in self._pending_status:
+                                self._pending_status.discard(sym)
+                                self._print_status(sym)
+                                if not self._pending_status:
+                                    await self._send_startup_summary()
+                            await self.check_trailing_stop(sym, price)
+                            await self.check_signals(sym)
+                for pair_symbol, components in self._pair_components.items():
+                    symbol1, symbol2 = components[0], components[1]
+                    p1 = await self.fetch_ticker_price(symbol1, proxy)
+                    p2 = await self.fetch_ticker_price(symbol2, proxy)
+                    if p1 > 0:
+                        self.mark_prices[symbol1] = p1
+                        self.mark_price_times[symbol1] = current_time
+                    if p2 > 0:
+                        self.mark_prices[symbol2] = p2
+                        self.mark_price_times[symbol2] = current_time
+                    if p1 > 0 and p2 > 0:
+                        pair_price = p1 / p2
+                        self.mark_prices[pair_symbol] = pair_price
+                        self.mark_price_times[pair_symbol] = current_time
+                        if pair_symbol in self._pending_status:
+                            self._pending_status.discard(pair_symbol)
+                            self._print_status(pair_symbol)
+                            if not self._pending_status:
+                                await self._send_startup_summary()
+                        await self.check_trailing_stop(pair_symbol, pair_price)
+                        await self.check_signals(pair_symbol)
+            except Exception as e:
+                logger.warning(f"Price poll error: {e}")
+            await asyncio.sleep(1)
 
     def calculate_supertrend(self, high, low, close, period, multiplier):
         close_shifted = np.roll(close, 1)
@@ -872,8 +972,6 @@ class NotificationService:
             ts["atr15m_upper"] = upper
             ts["atr15m_lower"] = lower
             ts["atr15m_state"] = (upper, lower, ch)
-        except Exception as e:
-            self.warn(f"update_15m_atr error for {symbol}: {e}")
         except Exception as e:
             self.warn(f"update_15m_atr error for {symbol}: {e}")
 
@@ -1218,13 +1316,9 @@ class NotificationService:
         st_state = ("1" if current_price > st1_val else "0") + (
             "1" if current_price > st2_val else "0"
         )
-        vt_state = ("1" if ema_s_val > ema_u_val else "0") + (
-            "1" if ema_s_val > ema_l_val else "0"
-        )
 
         if not self._initialized:
             self.last_st_state[symbol] = st_state
-            self.last_vt_state[symbol] = vt_state
             return
 
         now = time.time()
@@ -1301,23 +1395,55 @@ class NotificationService:
                 if not current_price and symbol in self.kline_cache:
                     klines = self.kline_cache[symbol]
                     current_price = float(klines[-1][4]) if klines else 0
-                st_state = ""
-                if current_price and current_price > bm["st1"]:
-                    st_state += "1"
-                else:
-                    st_state += "0"
-                if current_price and current_price > bm["st2"]:
-                    st_state += "1"
-                else:
-                    st_state += "0"
-                vt_state = ("1" if bm["ema_s"] > bm["ema_u"] else "0") + (
-                    "1" if bm["ema_s"] > bm["ema_l"] else "0"
+                atr_ch = bm.get("atr1h_ch", 0)
+                direction = (
+                    "LONG" if atr_ch == 1 else ("SHORT" if atr_ch == -1 else "N/A")
                 )
-                self.last_st_state[symbol] = st_state
-                self.last_vt_state[symbol] = vt_state
-                logger.info(f"{symbol}: ST={st_state}, VT={vt_state}")
+                self.last_st_state[symbol] = direction
+                logger.info(f"{symbol}: ATR_Ch={direction}")
         self._initialized = True
         logger.info("Initialization complete")
+        for sym in self.symbols:
+            if sym not in self.mark_prices or self.mark_prices.get(sym, 0) <= 0:
+                self._pending_status.add(sym)
+        for pair_sym in self._pair_components:
+            if (
+                pair_sym not in self.mark_prices
+                or self.mark_prices.get(pair_sym, 0) <= 0
+            ):
+                self._pending_status.add(pair_sym)
+        if not self._pending_status:
+            await self._send_startup_summary()
+
+    async def _send_startup_summary(self):
+        lines = []
+        for sym in self.symbols:
+            current_price = self.mark_prices.get(sym)
+            bm = self.benchmark.get(sym)
+            if bm and current_price:
+                atr_upper = bm.get("atr1h_upper", 0)
+                atr_lower = bm.get("atr1h_lower", 0)
+                atr_ch = bm.get("atr1h_ch", 0)
+                direction = (
+                    "LONG" if atr_ch == 1 else ("SHORT" if atr_ch == -1 else "N/A")
+                )
+                lines.append(
+                    f"{sym}: {direction} | Price={format_number(current_price)} | Channel={format_number(atr_lower)}~{format_number(atr_upper)}"
+                )
+        if lines:
+            await self.send_webhook("SYSTEM", "\n".join(lines))
+
+    def _print_status(self, symbol: str):
+        current_price = self.mark_prices.get(symbol)
+        bm = self.benchmark.get(symbol)
+        if bm and current_price:
+            atr_upper = bm.get("atr1h_upper", 0)
+            atr_lower = bm.get("atr1h_lower", 0)
+            atr_ch = bm.get("atr1h_ch", 0)
+            direction = "LONG" if atr_ch == 1 else ("SHORT" if atr_ch == -1 else "N/A")
+            logger.info(
+                f"[STATUS] {symbol}: Price={format_number(current_price)}, ATR_Ch={direction}, Channel={format_number(atr_lower)}~{format_number(atr_upper)}"
+            )
 
     async def heartbeat_loop(self):
         while self.running:
@@ -1336,30 +1462,23 @@ class NotificationService:
                         try:
                             current_price = self.mark_prices.get(symbol)
                             bm = self.benchmark.get(symbol)
-                            if bm:
-                                ema_s = bm["ema_s"]
-                                ema_u = bm["ema_u"]
-                                ema_l = bm["ema_l"]
-                                st1_val = bm["st1"]
-                                st2_val = bm["st2"]
-                                st_state = (
-                                    "1"
-                                    if current_price and current_price > st1_val
-                                    else "0"
-                                ) + (
-                                    "1"
-                                    if current_price and current_price > st2_val
-                                    else "0"
-                                )
-                                vt_state = ("1" if ema_s > ema_u else "0") + (
-                                    "1" if ema_s > ema_l else "0"
+                            if bm and current_price:
+                                atr_upper = bm.get("atr1h_upper", 0)
+                                atr_lower = bm.get("atr1h_lower", 0)
+                                atr_ch = bm.get("atr1h_ch", 0)
+                                direction = (
+                                    "LONG"
+                                    if atr_ch == 1
+                                    else ("SHORT" if atr_ch == -1 else "N/A")
                                 )
                                 logger.info(
-                                    f"[STATUS] {symbol}: Price={format_number(current_price) if current_price is not None else 'N/A'}, ST={st_state}, EMA_S={format_number(ema_s)}, EMA_U={format_number(ema_u)}, EMA_L={format_number(ema_l)}, VT={vt_state}"
+                                    f"[STATUS] {symbol}: Price={format_number(current_price)}, ATR_Ch={direction}, Channel={format_number(atr_lower)}~{format_number(atr_upper)}"
                                 )
+                            elif not current_price:
+                                logger.warning(f"[STATUS] {symbol}: price=N/A")
                             else:
                                 logger.warning(
-                                    f"[STATUS] {symbol}: benchmark not ready (klines insufficient), price={current_price}"
+                                    f"[STATUS] {symbol}: benchmark not ready"
                                 )
                         except Exception as e:
                             logger.warning(f"[STATUS] {symbol}: error: {e}")
@@ -1440,25 +1559,44 @@ class NotificationService:
         await self.connect()
         await self.initialize()
         status_task = asyncio.create_task(self.status_loop())
+        poll_task = asyncio.create_task(self._poll_prices())
         last_kline_update = 0
+        ws_reconnect_attempts = 0
+        ws_reconnect_base = 1
+        ws_reconnect_max = 60
         while self.running:
             try:
-                await asyncio.sleep(60)
+                await asyncio.sleep(1)
                 current_time = time.time()
                 if current_time - last_kline_update > 3600:
                     for symbol in self.symbols:
                         await self.update_klines(symbol)
                     last_kline_update = current_time
                 if self.client and not self.client.is_connected:
-                    log_warning("Connection lost, reconnecting...")
-                    await self.send_webhook(
-                        "SYSTEM", "Connection lost, reconnecting..."
+                    ws_reconnect_attempts += 1
+                    delay = min(
+                        ws_reconnect_base * (2 ** (ws_reconnect_attempts - 1)),
+                        ws_reconnect_max,
                     )
-                    await self.client.connect()
-                    self.connected = True
-                    await self.send_webhook(
-                        "SYSTEM", "Aster Monitor reconnected to Mainnet"
+                    logger.warning(
+                        f"Connection lost, reconnecting in {delay}s (attempt {ws_reconnect_attempts})..."
                     )
+                    await self.send_webhook(
+                        "SYSTEM", f"Connection lost, reconnecting in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    try:
+                        await self.client.connect()
+                        self.connected = True
+                        ws_reconnect_attempts = 0
+                        await self.send_webhook(
+                            "SYSTEM", "Aster Monitor reconnected to Mainnet"
+                        )
+                        for symbol in self.symbols:
+                            await self.subscribe_symbol(symbol)
+                        await self.subscribe_all_tickers()
+                    except Exception as e:
+                        logger.warning(f"Reconnect failed: {e}")
                     for symbol in self.symbols:
                         await self.subscribe_symbol(symbol)
                     await self.subscribe_all_tickers()
@@ -1470,6 +1608,7 @@ class NotificationService:
         heartbeat_task.cancel()
         status_task.cancel()
         config_task.cancel()
+        poll_task.cancel()
 
     async def stop(self):
         self.running = False

@@ -5,8 +5,10 @@
 ## 功能特性
 
 - **WebSocket实时行情**: 批量订阅多币种ticker，秒级延迟
+- **REST Polling Fallback**: WebSocket数据不可用时自动切换REST polling（1秒间隔）
+- **指数退避重连**: WebSocket断开后1s→2s→4s→...→60s指数退避重连
 - **ATR Channel**: 1H DEMA ATR通道突破推送 + 15m HMA ATR追踪止损
-- **PairTrading支持**: 支持 "ETHUSDT/BTCUSDT" 等交易对，K线h=max(o,c),l=min(o,c)
+- **PairTrading支持**: 支持 "BTCUSDT/ETHUSDT"、"XAUUSDT/XAGUSDT" 等交易对，K线h=max(o,c),l=min(o,c)
 - **飞书推送**: 支持Card和TradingView两种消息格式
 - **每2分钟状态报告**: 可通过命令控制打印/暂停
 - **每日报告**: 定时推送过去24小时警报次数
@@ -80,10 +82,10 @@ python notification_service.py
 
 | 信号 | 格式 | 含义 |
 |------|------|------|
-| ST | `[BTCUSDT] LONG` | 1H ATR Channel 多头突破 |
-| ST | `[BTCUSDT] SHORT` | 1H ATR Channel 空头突破 |
-| ST | `[BTCUSDT] LONG TRAILING STOP` | 15m 追踪止损触发(多头) |
-| ST | `[BTCUSDT] SHORT TRAILING STOP` | 15m 追踪止损触发(空头) |
+| ATR_Ch | `[BTCUSDT] LONG` | 1H ATR Channel 多头突破 |
+| ATR_Ch | `[BTCUSDT] SHORT` | 1H ATR Channel 空头突破 |
+| ATR_Ch | `[BTCUSDT] LONG TRAILING STOP` | 15m 追踪止损触发(多头) |
+| ATR_Ch | `[BTCUSDT] SHORT TRAILING STOP` | 15m 追踪止损触发(空头) |
 | SYSTEM | `Aster Monitor connected to Mainnet` | 系统消息 |
 | CONFIG | `Hot reload successful` | 配置热重载 |
 | REPORT | `Alert count in last 24h: 5` | Daily report |
@@ -93,9 +95,11 @@ python notification_service.py
 每120秒打印所有监控标的状态：
 
 ```
-[STATUS] 2026-03-28 22:44:00
-[STATUS] BTCUSDT: Price=66787.7, ST=00, EMA_S=66465.8, EMA_U=68747.2, EMA_L=68951.6, VT=00
-[STATUS] ETHUSDT: Price=2024.6, ST=11, EMA_S=2006.16, EMA_U=2078.44, EMA_L=2085.63, VT=00
+[STATUS] 2026-03-31 19:04:03
+[STATUS] BTCUSDT: Price=66288.5, ATR_Ch=SHORT, Channel=66091.9~67179.346
+[STATUS] ETHUSDT: Price=2026.3, ATR_Ch=SHORT, Channel=2017.1~2053.5111
+[STATUS] BTCUSDT/ETHUSDT: Price=32.71406, ATR_Ch=SHORT, Channel=32.730607~32.808087
+[STATUS] XAUUSDT/XAGUSDT: Price=62.563961, ATR_Ch=SHORT, Channel=62.451388~63.012791
 ```
 
 数值格式：整数部分非零时按8位有效数字，整数为零时保留8位小数。
@@ -108,7 +112,7 @@ url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
 format = "card"   # card (默认) 或 tradingview
 
 [symbols]
-monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "ETHUSDT/BTCUSDT"]
+monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "BTCUSDT/ETHUSDT", "XAUUSDT/XAGUSDT"]
 
 [atr_1h]
 ma_type = "DEMA"      # DEMA, RMA, EMA, SMA, WMA
@@ -160,8 +164,6 @@ times = ["08:00", "20:00"]
 timezone = "Z"          # Z=UTC+0, "+08:00"=UTC+8, "-05:00"=UTC-5
 max_log_lines = 1000   # 超过此行数自动轮转日志
 ```
-
-### 热重载
 
 ### 热重载
 

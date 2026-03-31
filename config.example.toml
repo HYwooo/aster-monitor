@@ -3,7 +3,7 @@ url = "https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-here"
 format = "card"
 
 [symbols]
-monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "ETHUSDT/BTCUSDT"]
+monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "BTCUSDT/ETHUSDT", "XAUUSDT/XAGUSDT"]
 
 [atr_1h]
 ma_type = "DEMA"      # DEMA, RMA, EMA, SMA, WMA

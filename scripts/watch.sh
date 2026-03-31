@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SERVICE_DIR="$(cd "$(dirname "$0")" && pwd)/.."
-HEARTBEAT_FILE="$SERVICE_DIR/notification_heartbeat"
+HEARTBEAT_FILE="$SERVICE_DIR/heartbeat"
 TIMEOUT=120
 
 if [ ! -f "$HEARTBEAT_FILE" ]; then

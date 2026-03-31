@@ -429,7 +429,7 @@ class NotificationService:
         state = extra.get("state", "")
         reason = extra.get("reason", "")
 
-        if alert_type == "ST":
+        if alert_type == "ATR_Ch":
             is_trailing = reason == "trailing_stop"
             if is_trailing:
                 color = "orange"
@@ -550,12 +550,12 @@ class NotificationService:
 
     async def send_webhook(self, alert_type: str, message: str, extra: dict = None):
         timestamp = self._get_timestamp()
-        full_content = f"[{timestamp}] {alert_type}: {message}"
+        full_content = f"[{timestamp}] [{alert_type}] {message}"
 
         try:
             self._rotate_webhook_log_if_needed()
             with open(WEBHOOK_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"[{timestamp}] {full_content}\n")
+                f.write(f"{full_content}\n")
         except Exception as e:
             logger.warning(f"Write webhook log failed: {e}")
 
@@ -989,7 +989,7 @@ class NotificationService:
             direction = ts.get("direction", "")
             if direction == "LONG" and lower > 0 and current_price < lower:
                 await self.send_webhook(
-                    "ST",
+                    "ATR_Ch",
                     f"[{symbol}] TRAILING STOP",
                     {
                         "symbol": symbol,
@@ -1005,7 +1005,7 @@ class NotificationService:
                 logger.info(f"Trailing stop hit for {symbol} at {lower}")
             elif direction == "SHORT" and upper > 0 and current_price > upper:
                 await self.send_webhook(
-                    "ST",
+                    "ATR_Ch",
                     f"[{symbol}] TRAILING STOP",
                     {
                         "symbol": symbol,
@@ -1328,12 +1328,12 @@ class NotificationService:
         prev_atr_state = self.last_atr_state.get(symbol, {"ch": 0, "sent": None})
 
         if current_price >= atr1h_upper and prev_atr_state["ch"] != 1:
-            last_alert = self.last_alert_time.get(f"ST_{symbol}", 0)
+            last_alert = self.last_alert_time.get(f"ATR_Ch_{symbol}", 0)
             if now - last_alert > 3600:
-                self.last_alert_time[f"ST_{symbol}"] = now
+                self.last_alert_time[f"ATR_Ch_{symbol}"] = now
                 self.last_atr_state[symbol] = {"ch": 1, "sent": "LONG"}
                 await self.send_webhook(
-                    "ST",
+                    "ATR_Ch",
                     f"[{symbol}] LONG",
                     {
                         "symbol": symbol,
@@ -1355,12 +1355,12 @@ class NotificationService:
                     "active": True,
                 }
         elif current_price <= atr1h_lower and prev_atr_state["ch"] != -1:
-            last_alert = self.last_alert_time.get(f"ST_{symbol}", 0)
+            last_alert = self.last_alert_time.get(f"ATR_Ch_{symbol}", 0)
             if now - last_alert > 3600:
-                self.last_alert_time[f"ST_{symbol}"] = now
+                self.last_alert_time[f"ATR_Ch_{symbol}"] = now
                 self.last_atr_state[symbol] = {"ch": -1, "sent": "SHORT"}
                 await self.send_webhook(
-                    "ST",
+                    "ATR_Ch",
                     f"[{symbol}] SHORT",
                     {
                         "symbol": symbol,
@@ -1597,9 +1597,6 @@ class NotificationService:
                         await self.subscribe_all_tickers()
                     except Exception as e:
                         logger.warning(f"Reconnect failed: {e}")
-                    for symbol in self.symbols:
-                        await self.subscribe_symbol(symbol)
-                    await self.subscribe_all_tickers()
             except asyncio.CancelledError:
                 break
             except Exception as e:

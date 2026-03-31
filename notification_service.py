@@ -143,6 +143,12 @@ class NotificationService:
         self.vt_ema_signal = self.config.get("vegas", {}).get("ema_signal", 9)
         self.vt_ema_upper = self.config.get("vegas", {}).get("ema_upper", 144)
         self.vt_ema_lower = self.config.get("vegas", {}).get("ema_lower", 169)
+        self.atr1h_ma_type = self.config.get("atr_1h", {}).get("ma_type", "DEMA")
+        self.atr1h_period = self.config.get("atr_1h", {}).get("period", 14)
+        self.atr1h_mult = self.config.get("atr_1h", {}).get("mult", 1.618)
+        self.atr15m_ma_type = self.config.get("atr_15m", {}).get("ma_type", "HMA")
+        self.atr15m_period = self.config.get("atr_15m", {}).get("period", 14)
+        self.atr15m_mult = self.config.get("atr_15m", {}).get("mult", 1.3)
         self.heartbeat_file = self.config["service"]["heartbeat_file"]
         self.proxy_enable = self.config.get("proxy", {}).get("enable", False)
         self.proxy_url = self.config.get("proxy", {}).get("url", "")
@@ -272,6 +278,12 @@ class NotificationService:
             "vt_ema_signal": self.vt_ema_signal,
             "vt_ema_upper": self.vt_ema_upper,
             "vt_ema_lower": self.vt_ema_lower,
+            "atr1h_ma_type": self.atr1h_ma_type,
+            "atr1h_period": self.atr1h_period,
+            "atr1h_mult": self.atr1h_mult,
+            "atr15m_ma_type": self.atr15m_ma_type,
+            "atr15m_period": self.atr15m_period,
+            "atr15m_mult": self.atr15m_mult,
             "heartbeat_file": self.heartbeat_file,
             "proxy_enable": self.proxy_enable,
             "proxy_url": self.proxy_url,
@@ -293,6 +305,12 @@ class NotificationService:
             self.vt_ema_signal = old_state["vt_ema_signal"]
             self.vt_ema_upper = old_state["vt_ema_upper"]
             self.vt_ema_lower = old_state["vt_ema_lower"]
+            self.atr1h_ma_type = old_state["atr1h_ma_type"]
+            self.atr1h_period = old_state["atr1h_period"]
+            self.atr1h_mult = old_state["atr1h_mult"]
+            self.atr15m_ma_type = old_state["atr15m_ma_type"]
+            self.atr15m_period = old_state["atr15m_period"]
+            self.atr15m_mult = old_state["atr15m_mult"]
             self.heartbeat_file = old_state["heartbeat_file"]
             self.proxy_enable = old_state["proxy_enable"]
             self.proxy_url = old_state["proxy_url"]
@@ -327,6 +345,12 @@ class NotificationService:
             self.vt_ema_signal = self.config.get("vegas", {}).get("ema_signal", 9)
             self.vt_ema_upper = self.config.get("vegas", {}).get("ema_upper", 144)
             self.vt_ema_lower = self.config.get("vegas", {}).get("ema_lower", 169)
+            self.atr1h_ma_type = self.config.get("atr_1h", {}).get("ma_type", "DEMA")
+            self.atr1h_period = self.config.get("atr_1h", {}).get("period", 14)
+            self.atr1h_mult = self.config.get("atr_1h", {}).get("mult", 1.618)
+            self.atr15m_ma_type = self.config.get("atr_15m", {}).get("ma_type", "HMA")
+            self.atr15m_period = self.config.get("atr_15m", {}).get("period", 14)
+            self.atr15m_mult = self.config.get("atr_15m", {}).get("mult", 1.3)
             self.heartbeat_file = self.config["service"]["heartbeat_file"]
             self.proxy_enable = self.config.get("proxy", {}).get("enable", False)
             self.proxy_url = self.config.get("proxy", {}).get("url", "")
@@ -396,71 +420,62 @@ class NotificationService:
         state = extra.get("state", "")
         reason = extra.get("reason", "")
 
-        if alert_type in ("ST", "VT"):
-            if direction == "long" or direction == "bullish":
+        if alert_type == "ST":
+            is_trailing = reason == "trailing_stop"
+            if is_trailing:
+                color = "orange"
+                emoji = "🛑"
+            elif direction == "long":
                 color = "green"
                 emoji = "📈"
-                direction_label = "LONG" if alert_type == "ST" else "BULLISH"
-            else:
+            elif direction == "short":
                 color = "red"
                 emoji = "📉"
-                direction_label = "SHORT" if alert_type == "ST" else "BEARISH"
-
-            if alert_type == "ST":
-                title = f"{emoji} SuperTrend {symbol}"
-                price = extra.get("price", "")
-                st1 = extra.get("st1", "")
-                st2 = extra.get("st2", "")
-                elements = [
-                    {"tag": "markdown", "content": f"**Direction:** {direction_label}"},
-                    {"tag": "markdown", "content": f"**Price:** {price}"},
-                    {"tag": "markdown", "content": f"**ST1:** {st1} | **ST2:** {st2}"},
-                    {"tag": "hr"},
-                    {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
-                ]
             else:
-                title = f"{emoji} Vegas Tunnel {symbol}"
-                ema9 = extra.get("ema9", "")
-                ema144 = extra.get("ema144", "")
-                ema169 = extra.get("ema169", "")
+                color = "blue"
+                emoji = "📊"
+
+            price = extra.get("price", "")
+            atr_upper = extra.get("atr_upper", "")
+            atr_lower = extra.get("atr_lower", "")
+            stop_line = extra.get("stop_line", "")
+            entry_price = extra.get("entry_price", "")
+            if is_trailing:
                 elements = [
-                    {"tag": "markdown", "content": f"**Direction:** {direction_label}"},
-                    {"tag": "markdown", "content": f"**EMA9:** {ema9}"},
                     {
                         "tag": "markdown",
-                        "content": f"**EMA144:** {ema144} | **EMA169:** {ema169}",
+                        "content": f"**Direction:** {direction.upper()} TRAILING STOP",
                     },
+                    {"tag": "markdown", "content": f"**Price:** {price}"},
+                    {"tag": "markdown", "content": f"**Stop Line:** {stop_line}"},
+                    {"tag": "markdown", "content": f"**Entry:** {entry_price}"},
+                ]
+            else:
+                elements = [
+                    {
+                        "tag": "markdown",
+                        "content": f"**Direction:** {direction.upper()}",
+                    },
+                    {"tag": "markdown", "content": f"**Price:** {price}"},
+                ]
+            if stop_line:
+                elements.append(
+                    {"tag": "markdown", "content": f"**Stop Line:** {stop_line}"}
+                )
+            if atr_upper and atr_lower and not is_trailing:
+                elements.append(
+                    {
+                        "tag": "markdown",
+                        "content": f"**ATR Channel:** {atr_lower} ~ {atr_upper}",
+                    }
+                )
+            elements.extend(
+                [
                     {"tag": "hr"},
                     {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
                 ]
-
-        elif alert_type == "BREAKOUT":
-            confirmed = extra.get("confirmed", False)
-            if confirmed:
-                color = "orange"
-                emoji = "🚀"
-                status = "CONFIRMED"
-            elif reason == "reverse":
-                color = "yellow"
-                emoji = "🔄"
-                status = "REVERSE"
-            else:
-                color = "yellow"
-                emoji = "⏳"
-                status = "NO_CONTINUATION"
-
-            direction_label = direction.upper() if direction else ""
-            price = extra.get("price", "")
-            trigger = extra.get("trigger", "")
-            elements = [
-                {"tag": "markdown", "content": f"**Direction:** {direction_label}"},
-                {"tag": "markdown", "content": f"**Price:** {price}"},
-                {"tag": "markdown", "content": f"**Trigger:** {trigger}"},
-                {"tag": "markdown", "content": f"**Status:** {status}"},
-                {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Trigger Time:** {timestamp}"},
-            ]
-            title = f"{emoji} Breakout {symbol} {status}"
+            )
+            title = f"{emoji} {symbol}"
 
         elif alert_type == "SYSTEM":
             color = "blue"
@@ -835,11 +850,19 @@ class NotificationService:
                 h_ratio = max(o, c) if o > 0 else c
                 l_ratio = min(o, c) if o > 0 else c
                 atr = self.calculate_atr(
-                    np.array([h_ratio]), np.array([l_ratio]), np.array([c]), 14, "HMA"
+                    np.array([h_ratio]),
+                    np.array([l_ratio]),
+                    np.array([c]),
+                    self.atr15m_period,
+                    self.atr15m_ma_type,
                 )[0]
             else:
                 atr = self.calculate_atr(
-                    np.array([h]), np.array([l]), np.array([c]), 14, "HMA"
+                    np.array([h]),
+                    np.array([l]),
+                    np.array([c]),
+                    self.atr15m_period,
+                    self.atr15m_ma_type,
                 )[0]
             if math.isnan(atr) or atr <= 0:
                 return
@@ -1129,13 +1152,15 @@ class NotificationService:
                 high, low, close, self.st_period2, self.st_multiplier2
             )
             ema_s, ema_u, ema_l = self.calculate_vegas_tunnel(close)
-            atr1h = self.calculate_atr(high, low, close, 14, "DEMA")
+            atr1h = self.calculate_atr(
+                high, low, close, self.atr1h_period, self.atr1h_ma_type
+            )
             prev_atr_state = self.benchmark.get(symbol, {}).get(
                 "atr1h_state", (float("nan"), float("nan"), 0)
             )
             for i in range(len(close)):
                 upper, lower, ch = self.run_atr_channel(
-                    close[i], atr1h[i], 1.7, prev_atr_state
+                    close[i], atr1h[i], self.atr1h_mult, prev_atr_state
                 )
                 prev_atr_state = (upper, lower, ch)
             atr1h_upper, atr1h_lower, atr1h_ch = prev_atr_state
@@ -1229,34 +1254,12 @@ class NotificationService:
                     "direction": direction,
                     "entry_price": current_price,
                     "entry_time": now,
-                    "atr_mult": 1.618,
+                    "atr_mult": self.atr15m_mult,
                     "atr15m_upper": 0,
                     "atr15m_lower": 0,
                     "atr15m_state": (float("nan"), float("nan"), 0),
                     "active": True,
                 }
-
-        if vt_state != self.last_vt_state.get(symbol):
-            old_state = self.last_vt_state.get(symbol, "??")
-            self.last_vt_state[symbol] = vt_state
-            if vt_state in ["11", "00"] and old_state not in ["11", "00"]:
-                last_alert = self.last_alert_time.get(f"VT_{symbol}", 0)
-                if now - last_alert > 3600:
-                    self.last_alert_time[f"VT_{symbol}"] = now
-                    direction = "BULLISH" if vt_state == "11" else "BEARISH"
-                    await self.send_webhook(
-                        "VT",
-                        f"{symbol} {vt_state} {direction}",
-                        {
-                            "symbol": symbol,
-                            "state": vt_state,
-                            "direction": direction,
-                            "ema9": format_number(ema_s_val),
-                            "ema144": format_number(ema_u_val),
-                            "ema169": format_number(ema_l_val),
-                        },
-                    )
-                    self._increment_alert_count()
 
     async def initialize(self):
         logger.info(f"Initializing klines for {len(self.symbols)} symbols...")

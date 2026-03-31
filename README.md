@@ -1,13 +1,12 @@
 # Aster Monitor
 
-实时监控Aster DEX (Mainnet) 合约标的价格，使用WebSocket连接监控Supertrend和Vegas Tunnel状态变化，通过飞书WebHook推送提醒。
+实时监控Aster DEX (Mainnet) 合约标的价格，使用WebSocket连接监控ATR Channel状态变化，通过飞书WebHook推送提醒。
 
 ## 功能特性
 
 - **WebSocket实时行情**: 批量订阅多币种ticker，秒级延迟
-- **Supertrend信号**: ST(9,2.5) + ST(14,1.7)，状态11/10/01/00
-- **Vegas Tunnel信号**: EMA9/144/169，状态11/00
-- **突破确认**: ST变11/00时启动15m监控，确认/假突破推送
+- **ATR Channel**: 1H DEMA ATR通道突破推送 + 15m HMA ATR追踪止损
+- **PairTrading支持**: 支持 "ETHUSDT/BTCUSDT" 等交易对，K线h=max(o,c),l=min(o,c)
 - **飞书推送**: 支持Card和TradingView两种消息格式
 - **每2分钟状态报告**: 可通过命令控制打印/暂停
 - **每日报告**: 定时推送过去24小时警报次数
@@ -81,13 +80,10 @@ python notification_service.py
 
 | 信号 | 格式 | 含义 |
 |------|------|------|
-| ST | `ST: BTCUSDT 11 LONG` | Supertrend做多突破 |
-| ST | `ST: BTCUSDT 00 SHORT` | Supertrend做空突破 |
-| VT | `VT: BTCUSDT 11 BULLISH` | Vegas Tunnel多头 |
-| VT | `VT: BTCUSDT 00 BEARISH` | Vegas Tunnel空头 |
-| BREAKOUT | `BREAKOUT: BTCUSDT LONG CONFIRMED` | 突破确认 |
-| BREAKOUT | `BREAKOUT: BTCUSDT LONG FALSE (REVERSE)` | 假突破-反向 |
-| BREAKOUT | `BREAKOUT: BTCUSDT LONG FALSE (NO_CONTINUATION)` | 假突破-无延续 |
+| ST | `[BTCUSDT] LONG` | 1H ATR Channel 多头突破 |
+| ST | `[BTCUSDT] SHORT` | 1H ATR Channel 空头突破 |
+| ST | `[BTCUSDT] LONG TRAILING STOP` | 15m 追踪止损触发(多头) |
+| ST | `[BTCUSDT] SHORT TRAILING STOP` | 15m 追踪止损触发(空头) |
 | SYSTEM | `Aster Monitor connected to Mainnet` | 系统消息 |
 | CONFIG | `Hot reload successful` | 配置热重载 |
 | REPORT | `Alert count in last 24h: 5` | Daily report |
@@ -112,18 +108,17 @@ url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
 format = "card"   # card (默认) 或 tradingview
 
 [symbols]
-monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "XAUUSDT"]
+monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "ETHUSDT/BTCUSDT"]
 
-[supertrend]
-period1 = 9
-multiplier1 = 2.5
-period2 = 14
-multiplier2 = 1.7
+[atr_1h]
+ma_type = "DEMA"      # DEMA, RMA, EMA, SMA, WMA
+period = 14
+mult = 1.618
 
-[vegas]
-ema_signal = 9
-ema_upper = 144
-ema_lower = 169
+[atr_15m]
+ma_type = "HMA"       # DEMA, RMA, EMA, SMA, WMA, HMA
+period = 14
+mult = 1.3
 
 [service]
 heartbeat_file = "notification_heartbeat"

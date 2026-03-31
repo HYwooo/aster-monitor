@@ -5,8 +5,18 @@ format = "card"
 [symbols]
 monitor_list = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "ETHUSDT/BTCUSDT"]
 
+[atr_1h]
+ma_type = "DEMA"      # DEMA, RMA, EMA, SMA, WMA
+period = 14
+mult = 1.618
+
+[atr_15m]
+ma_type = "HMA"       # DEMA, RMA, EMA, SMA, WMA, HMA
+period = 14
+mult = 1.3
+
 [service]
-heartbeat_file = "notification_heartbeat"
+heartbeat_file = "heartbeat"
 heartbeat_timeout = 120
 
 [proxy]

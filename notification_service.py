@@ -784,6 +784,7 @@ class NotificationService:
 
     async def _poll_prices(self):
         proxy = self.proxy_url if self.proxy_enable else None
+        last_15m_update = 0
         while self.running:
             try:
                 current_time = time.time()
@@ -822,6 +823,22 @@ class NotificationService:
                                 await self._send_startup_summary()
                         await self.check_trailing_stop(pair_symbol, pair_price)
                         await self.check_signals(pair_symbol)
+                if current_time - last_15m_update > 15:
+                    last_15m_update = current_time
+                    for sym in self.symbols:
+                        if sym in self.trailing_stop and self.trailing_stop[sym].get(
+                            "active"
+                        ):
+                            price = self.mark_prices.get(sym)
+                            if price:
+                                await self._update_15m_atr_from_poll(sym, price)
+                    for pair_sym in self._pair_components:
+                        if pair_sym in self.trailing_stop and self.trailing_stop[
+                            pair_sym
+                        ].get("active"):
+                            price = self.mark_prices.get(pair_sym)
+                            if price:
+                                await self._update_15m_atr_from_poll(pair_sym, price)
             except Exception as e:
                 logger.warning(f"Price poll error: {e}")
             await asyncio.sleep(1)
@@ -974,6 +991,84 @@ class NotificationService:
             ts["atr15m_state"] = (upper, lower, ch)
         except Exception as e:
             self.warn(f"update_15m_atr error for {symbol}: {e}")
+
+    async def _update_15m_atr_from_poll(self, symbol, current_price):
+        try:
+            if symbol not in self.trailing_stop or not self.trailing_stop[symbol].get(
+                "active"
+            ):
+                return
+            if current_price <= 0:
+                return
+            klines = await self.fetch_klines(
+                symbol,
+                limit=20,
+                interval="15m",
+                proxy=self.proxy_url if self.proxy_enable else None,
+            )
+            if not klines:
+                return
+            if self._is_pair_trading(symbol):
+                parts = symbol.split("/")
+                klines1 = await self.fetch_klines(
+                    parts[0],
+                    limit=20,
+                    interval="15m",
+                    proxy=self.proxy_url if self.proxy_enable else None,
+                )
+                klines2 = await self.fetch_klines(
+                    parts[1],
+                    limit=20,
+                    interval="15m",
+                    proxy=self.proxy_url if self.proxy_enable else None,
+                )
+                if not klines1 or not klines2:
+                    return
+                k2_by_time = {int(k[0]): k for k in klines2}
+                merged = []
+                for k1 in klines1:
+                    t = int(k1[0])
+                    if t not in k2_by_time:
+                        continue
+                    k2 = k2_by_time[t]
+                    o1, c1 = float(k1[1]), float(k1[4])
+                    o2, c2 = float(k2[1]), float(k2[4])
+                    if o2 == 0 or c2 == 0:
+                        continue
+                    ratio_o = o1 / o2
+                    ratio_c = c1 / c2
+                    merged.append(
+                        [
+                            t,
+                            ratio_o,
+                            max(ratio_o, ratio_c),
+                            min(ratio_o, ratio_c),
+                            ratio_c,
+                            float(k1[5]),
+                        ]
+                    )
+                klines = merged[-20:] if len(merged) >= 20 else merged
+            if len(klines) < 2:
+                return
+            ts = self.trailing_stop[symbol]
+            close_arr = np.array([float(k[4]) for k in klines], dtype=float)
+            high_arr = np.array([float(k[2]) for k in klines], dtype=float)
+            low_arr = np.array([float(k[3]) for k in klines], dtype=float)
+            atr_arr = self.calculate_atr(
+                high_arr, low_arr, close_arr, self.atr15m_period, self.atr15m_ma_type
+            )
+            atr = float(atr_arr[-1])
+            if math.isnan(atr) or atr <= 0:
+                return
+            prev_state = ts.get("atr15m_state", (float("nan"), float("nan"), 0))
+            upper, lower, ch = self.run_atr_channel(
+                current_price, atr, ts["atr_mult"], prev_state
+            )
+            ts["atr15m_upper"] = upper
+            ts["atr15m_lower"] = lower
+            ts["atr15m_state"] = (upper, lower, ch)
+        except Exception as e:
+            self.warn(f"_update_15m_atr_from_poll error for {symbol}: {e}")
 
     async def check_trailing_stop(self, symbol, current_price):
         if not current_price or current_price <= 0:

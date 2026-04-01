@@ -1224,7 +1224,7 @@ class NotificationService:
                     f"{symbol} LONG CONFIRMED",
                     {
                         "symbol": symbol,
-                        "direction": "long",
+                        "direction": "LONG",
                         "confirmed": True,
                         "price": format_number(current_close),
                         "trigger": format_number(trigger_price),
@@ -1238,7 +1238,7 @@ class NotificationService:
                     f"{symbol} LONG FALSE (REVERSE)",
                     {
                         "symbol": symbol,
-                        "direction": "long",
+                        "direction": "LONG",
                         "confirmed": False,
                         "reason": "reverse",
                         "price": format_number(current_close),
@@ -1252,7 +1252,7 @@ class NotificationService:
                     f"{symbol} LONG FALSE (NO_CONTINUATION)",
                     {
                         "symbol": symbol,
-                        "direction": "long",
+                        "direction": "LONG",
                         "confirmed": False,
                         "reason": "no_continuation",
                         "price": format_number(current_close),
@@ -1268,7 +1268,7 @@ class NotificationService:
                     f"{symbol} SHORT CONFIRMED",
                     {
                         "symbol": symbol,
-                        "direction": "short",
+                        "direction": "SHORT",
                         "confirmed": True,
                         "price": format_number(current_close),
                         "trigger": format_number(trigger_price),
@@ -1282,7 +1282,7 @@ class NotificationService:
                     f"{symbol} SHORT FALSE (REVERSE)",
                     {
                         "symbol": symbol,
-                        "direction": "short",
+                        "direction": "SHORT",
                         "confirmed": False,
                         "reason": "reverse",
                         "price": format_number(current_close),
@@ -1296,7 +1296,7 @@ class NotificationService:
                     f"{symbol} SHORT FALSE (NO_CONTINUATION)",
                     {
                         "symbol": symbol,
-                        "direction": "short",
+                        "direction": "SHORT",
                         "confirmed": False,
                         "reason": "no_continuation",
                         "price": format_number(current_close),
@@ -1432,7 +1432,7 @@ class NotificationService:
                     f"[{symbol}] LONG",
                     {
                         "symbol": symbol,
-                        "direction": "long",
+                        "direction": "LONG",
                         "price": format_number(current_price),
                         "atr_upper": format_number(atr1h_upper),
                         "atr_lower": format_number(atr1h_lower),
@@ -1440,7 +1440,7 @@ class NotificationService:
                 )
                 self._increment_alert_count()
                 self.trailing_stop[symbol] = {
-                    "direction": "long",
+                    "direction": "LONG",
                     "entry_price": current_price,
                     "entry_time": now,
                     "atr_mult": self.atr15m_mult,
@@ -1459,7 +1459,7 @@ class NotificationService:
                     f"[{symbol}] SHORT",
                     {
                         "symbol": symbol,
-                        "direction": "short",
+                        "direction": "SHORT",
                         "price": format_number(current_price),
                         "atr_upper": format_number(atr1h_upper),
                         "atr_lower": format_number(atr1h_lower),
@@ -1467,7 +1467,7 @@ class NotificationService:
                 )
                 self._increment_alert_count()
                 self.trailing_stop[symbol] = {
-                    "direction": "short",
+                    "direction": "SHORT",
                     "entry_price": current_price,
                     "entry_time": now,
                     "atr_mult": self.atr15m_mult,

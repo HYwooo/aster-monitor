@@ -116,6 +116,7 @@ async def update_klines(
     recalculate_states_fn=None,
     fetch_pair_klines_fn=None,
     fetch_klines_fn=None,
+    recalculate_states_clustering_fn=None,
 ):
     """
     获取指定交易对的最新 K 线数据，并触发指标重算。
@@ -126,9 +127,10 @@ async def update_klines(
         last_kline_time: 上次 K 线时间戳字典 {symbol: unix_ms}
         is_pair_trading_fn: 判断是否为配对交易对的函数 fn(symbol) -> bool
         proxy: HTTP 代理
-        recalculate_states_fn: async 回调，触发指标重算
+        recalculate_states_fn: async 回调，触发 SINGLE 指标重算
         fetch_pair_klines_fn: async 回调，获取配对 K 线（可选）
-        fetch_klines_fn: async 回调，单一 K 线 fetch 函数（可选）。用于配对时透传给 fetch_pair_klines 以支持 cache 复用。
+        fetch_klines_fn: async 回调，单一 K 线 fetch 函数（可选）
+        recalculate_states_clustering_fn: async 回调，触发 PAIR Clustering 指标重算（可选）
     """
     try:
         is_pair = is_pair_trading_fn(symbol)
@@ -149,7 +151,9 @@ async def update_klines(
             # 仅在新 K 线到达时触发重算
             if new_time > last_time:
                 last_kline_time[symbol] = new_time
-                if recalculate_states_fn:
+                if is_pair and recalculate_states_clustering_fn:
+                    await recalculate_states_clustering_fn(symbol)
+                elif recalculate_states_fn:
                     await recalculate_states_fn(symbol)
     except Exception:
         pass

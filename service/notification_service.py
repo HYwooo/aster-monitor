@@ -723,6 +723,7 @@ class NotificationService:
             lambda s: self._recalculate_states(s),
             self._fetch_pair_klines,
             self.fetch_klines,
+            self._ct_recalculate_states_clustering,
         )
 
     async def _ct_update_15m_atr(self, symbol, kline):
@@ -1065,6 +1066,7 @@ class NotificationService:
             lambda s: self._recalculate_states(s),
             self._fetch_pair_klines,
             self.fetch_klines,
+            self._ct_recalculate_states_clustering,
         )
 
     async def recalculate_states(self, symbol: str):
@@ -1095,8 +1097,30 @@ class NotificationService:
         for symbol in self.symbols:
             await self.update_klines(symbol)
         await asyncio.sleep(2)
+        # 对 SINGLE symbols 用 recalculate_states， PAIR symbols 用 recalculate_states_clustering
         for symbol in self.symbols:
-            if symbol in self.benchmark:
+            if self._is_pair_trading(symbol):
+                cluster_state = self.clustering_states.get(symbol)
+                if not cluster_state or not math.isfinite(cluster_state.trend):
+                    await self._ct_recalculate_states_clustering(symbol)
+                    cluster_state = self.clustering_states.get(symbol)
+                if cluster_state and math.isfinite(cluster_state.trend):
+                    trend = int(cluster_state.trend)
+                    direction = (
+                        "LONG" if trend == 1 else ("SHORT" if trend == -1 else "N/A")
+                    )
+                    self.last_clustering_state[symbol] = {
+                        "trend": trend,
+                        "sent": direction,
+                    }
+                    logger.info(
+                        f"{symbol}: ClusterST={direction}, TS={cluster_state.ts}"
+                    )
+                else:
+                    logger.warning(
+                        f"{symbol}: ClusterST init failed, clustering_states={cluster_state}"
+                    )
+            elif symbol in self.benchmark:
                 bm = self.benchmark[symbol]
                 current_price = self.mark_prices.get(symbol)
                 if not current_price and symbol in self.kline_cache:
@@ -1113,7 +1137,6 @@ class NotificationService:
         for sym in self.symbols:
             if sym not in self.mark_prices or self.mark_prices.get(sym, 0) <= 0:
                 self._pending_status.add(sym)
-            # SINGLE symbol 还需要 benchmark 就绪
             elif not self._is_pair_trading(sym) and sym not in self.benchmark:
                 self._pending_status.add(sym)
         for pair_sym in self._pair_components:

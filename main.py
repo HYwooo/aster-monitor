@@ -1,5 +1,5 @@
-import asyncio
 import argparse
+import asyncio
 import traceback
 
 from asterdex.logging_config import get_logger
@@ -8,9 +8,6 @@ from config import cleanup_old_logs, load_config, create_config, update_symbols
 from service import NotificationService
 
 logger = get_logger(__name__)
-
-WEBHOOK_LOG_FILE = "webhook_history.log"
-LOG_RETENTION_DAYS = 7
 
 
 async def main():
